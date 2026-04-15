@@ -11,7 +11,7 @@
     "discourage_terms": ["superhero", "buddy cop", "marvel"],
     "avoid_titles": [],
     "requires_history_signal": false,
-    "why_it_matters": "The baseline top-40 pool is weak on period romance, so this checks whether retrieval beyond blockbuster-heavy titles helps."
+    "why_it_matters": "Checks retrieval coverage outside blockbuster-heavy titles."
   },
   {
     "id": "supernatural_horror_ghosts",
@@ -25,7 +25,7 @@
     "discourage_terms": ["family-friendly", "uplifting"],
     "avoid_titles": [],
     "requires_history_signal": false,
-    "why_it_matters": "The baseline often drifts to generic thrillers when the request is horror-specific."
+    "why_it_matters": "Tests genre precision versus drift to generic thrillers."
   },
   {
     "id": "animated_music_family",
@@ -39,11 +39,11 @@
     "discourage_terms": ["violent", "serial killer", "gore"],
     "avoid_titles": [],
     "requires_history_signal": false,
-    "why_it_matters": "Checks whether the new ranking uses metadata well enough to stay inside family-friendly musical territory."
+    "why_it_matters": "Verifies family-safe tonal control in a niche lane."
   },
   {
     "id": "crime_heist_detective",
-    "category": "tone-match",
+    "category": "tone-control",
     "user_id": 120004,
     "preferences": "I want a crime thriller with heists, police work, and a tense cat-and-mouse feeling.",
     "history": [],
@@ -52,30 +52,39 @@
     "discourage_genres": ["fantasy", "animation"],
     "avoid_titles": [],
     "requires_history_signal": false,
-    "why_it_matters": "Useful for comparing focused crime retrieval versus generic popular titles."
+    "why_it_matters": "Measures tone match under a high-constraint request."
   },
   {
-    "id": "mind_bending_scifi_no_repeat",
-    "category": "history-avoid-repeat",
-    "user_id": 120005,
-    "preferences": "Give me mind-bending science fiction with big ideas and strong character arcs.",
-    "history": [
-      {
-        "tmdb_id": 157336,
-        "name": "Interstellar"
-      }
-    ],
-    "expected_positive_genres": ["science fiction", "drama"],
-    "expected_positive_keywords": ["mind-bending", "future", "character", "ideas"],
-    "discourage_genres": ["comedy"],
-    "avoid_titles": ["Interstellar"],
-    "avoid_title_roots": ["interstellar"],
-    "requires_history_signal": true,
-    "why_it_matters": "Verifies that watched movies are not repeated while preserving taste from history."
+    "id": "dark_fantasy_not_kids",
+    "category": "tone-control",
+    "user_id": 120012,
+    "preferences": "I want dark fantasy for adults, not a kid-friendly magical adventure.",
+    "history": [],
+    "expected_positive_genres": ["fantasy", "drama", "thriller"],
+    "expected_positive_keywords": ["dark", "adult", "ominous", "fantasy"],
+    "discourage_genres": ["family", "animation"],
+    "avoid_titles": [],
+    "discourage_terms": ["kid-friendly", "wholesome"],
+    "requires_history_signal": false,
+    "why_it_matters": "Checks negative-constraint handling in tone-sensitive prompts."
+  },
+  {
+    "id": "romcom_not_action",
+    "category": "tone-control",
+    "user_id": 120013,
+    "preferences": "I want a charming rom-com with chemistry and funny dialogue, definitely not an action movie.",
+    "history": [],
+    "expected_positive_genres": ["romance", "comedy"],
+    "expected_positive_keywords": ["chemistry", "funny", "rom-com", "dialogue"],
+    "discourage_genres": ["action", "thriller"],
+    "avoid_titles": [],
+    "discourage_terms": ["superhero", "explosion", "battle"],
+    "requires_history_signal": false,
+    "why_it_matters": "Ensures popularity does not override explicit tone constraints."
   },
   {
     "id": "marvel_fatigue",
-    "category": "history-franchise-avoidance",
+    "category": "history-distinction",
     "user_id": 120006,
     "preferences": "I still want fun action and spectacle, but not another Marvel-style superhero team-up.",
     "history": [
@@ -95,11 +104,11 @@
     "avoid_title_roots": ["avengers"],
     "discourage_terms": ["marvel", "superhero team"],
     "requires_history_signal": true,
-    "why_it_matters": "Checks whether history is used to avoid obvious same-franchise repeats rather than recommending the next Avengers movie."
+    "why_it_matters": "Tests novelty from history while preserving core request intent."
   },
   {
     "id": "nolan_like_but_new",
-    "category": "history-director-signal",
+    "category": "history-distinction",
     "user_id": 120007,
     "preferences": "I like cerebral sci-fi and precision-made thrillers. Give me something with similar ambition, but not something I've already seen.",
     "history": [
@@ -118,104 +127,11 @@
     "avoid_titles": ["Interstellar", "Inception"],
     "avoid_title_roots": ["interstellar", "inception"],
     "requires_history_signal": true,
-    "why_it_matters": "Measures whether history is treated as a taste profile rather than just a blocklist."
-  },
-  {
-    "id": "actor_taste_signal",
-    "category": "history-cast-signal",
-    "user_id": 120008,
-    "preferences": "I want a stylish, moody crime story with the same cool energy as movies starring Ryan Gosling.",
-    "history": [
-      {
-        "tmdb_id": 64690,
-        "name": "Drive"
-      }
-    ],
-    "expected_positive_genres": ["crime", "thriller", "drama"],
-    "expected_positive_keywords": ["stylish", "moody", "cool"],
-    "discourage_genres": ["animation", "fantasy"],
-    "avoid_titles": ["Drive"],
-    "avoid_title_roots": ["drive"],
-    "requires_history_signal": true,
-    "why_it_matters": "Tests whether cast and tone from history can nudge the ranking without repeating the watched title."
-  },
-  {
-    "id": "director_signal_gerwig",
-    "category": "history-director-signal",
-    "user_id": 120009,
-    "preferences": "I want a witty, emotional coming-of-age story with sharp writing and a strong female lead.",
-    "history": [
-      {
-        "tmdb_id": 391713,
-        "name": "Lady Bird"
-      }
-    ],
-    "expected_positive_genres": ["drama", "comedy"],
-    "expected_positive_keywords": ["coming of age", "female lead", "witty", "emotional"],
-    "discourage_genres": ["action", "superhero"],
-    "avoid_titles": ["Lady Bird"],
-    "avoid_title_roots": ["lady bird"],
-    "requires_history_signal": true,
-    "why_it_matters": "A stronger recommender should carry forward the tone and authorship cues from the watch history."
-  },
-  {
-    "id": "foreign_language_drama",
-    "category": "diversity",
-    "user_id": 120010,
-    "preferences": "I want a thoughtful foreign-language drama with intimate family conflict and realistic performances.",
-    "history": [],
-    "expected_positive_genres": ["drama"],
-    "expected_positive_keywords": ["family", "intimate", "realistic", "foreign-language"],
-    "discourage_genres": ["superhero", "broad comedy"],
-    "avoid_titles": [],
-    "prefer_non_english": true,
-    "requires_history_signal": false,
-    "why_it_matters": "Checks whether the full-dataset retrieval opens up less mainstream, non-English options."
-  },
-  {
-    "id": "sports_underdog_family",
-    "category": "diversity",
-    "user_id": 120011,
-    "preferences": "Give me a family-friendly underdog sports movie with heart, teamwork, and crowd-pleasing momentum.",
-    "history": [],
-    "expected_positive_genres": ["family", "comedy", "drama"],
-    "expected_positive_keywords": ["sports", "underdog", "teamwork", "heart"],
-    "discourage_genres": ["horror", "crime"],
-    "avoid_titles": [],
-    "requires_history_signal": false,
-    "why_it_matters": "The baseline pool is poor at family sports stories, so this highlights candidate-pool expansion."
-  },
-  {
-    "id": "dark_fantasy_not_kids",
-    "category": "tone-control",
-    "user_id": 120012,
-    "preferences": "I want dark fantasy for adults, not a kid-friendly magical adventure.",
-    "history": [],
-    "expected_positive_genres": ["fantasy", "drama", "thriller"],
-    "expected_positive_keywords": ["dark", "adult", "ominous", "fantasy"],
-    "discourage_genres": ["family", "animation"],
-    "avoid_titles": [],
-    "discourage_terms": ["kid-friendly", "wholesome"],
-    "requires_history_signal": false,
-    "why_it_matters": "Useful for checking whether the description and ranking honor tone rather than just matching a broad genre word."
-  },
-  {
-    "id": "romcom_not_action",
-    "category": "tone-control",
-    "user_id": 120013,
-    "preferences": "I want a charming rom-com with chemistry and funny dialogue, definitely not an action movie.",
-    "history": [],
-    "expected_positive_genres": ["romance", "comedy"],
-    "expected_positive_keywords": ["chemistry", "funny", "rom-com", "dialogue"],
-    "discourage_genres": ["action", "thriller"],
-    "avoid_titles": [],
-    "discourage_terms": ["superhero", "explosion", "battle"],
-    "requires_history_signal": false,
-    "why_it_matters": "Checks that the model does not over-index on popularity and accidentally suggest action-heavy titles."
+    "why_it_matters": "Evaluates distinction from watched anchors without losing mood fit."
   },
   {
     "id": "history_exact_repeat_guard",
-    "category": "history-avoid-repeat",
+    "category": "history-distinction",
     "user_id": 120014,
     "preferences": "Recommend me a moving animated movie about family and memory.",
     "history": [
@@ -230,11 +146,39 @@
     "avoid_titles": ["Coco"],
     "avoid_title_roots": ["coco"],
     "requires_history_signal": true,
-    "why_it_matters": "Directly tests the no-repeat rule on a query where the watched title would otherwise be very tempting."
+    "why_it_matters": "Hard guardrail for no-repeat behavior plus theme continuity."
+  },
+  {
+    "id": "persuasion_hook_urban_fantasy",
+    "category": "description-persuadability",
+    "user_id": 120017,
+    "preferences": "Give me an urban fantasy thriller with mystery, danger, and a stylish modern city atmosphere.",
+    "history": [],
+    "expected_positive_genres": ["fantasy", "thriller", "mystery"],
+    "expected_positive_keywords": ["urban", "mystery", "danger", "stylish", "atmosphere"],
+    "discourage_genres": ["family", "animation", "broad comedy"],
+    "discourage_terms": ["kid-friendly", "wholesome"],
+    "avoid_titles": [],
+    "requires_history_signal": false,
+    "why_it_matters": "Directly tests compelling hook quality under a vivid style request."
+  },
+  {
+    "id": "persuasion_romance_specificity",
+    "category": "description-persuadability",
+    "user_id": 120018,
+    "preferences": "I want a heartfelt romance with mature characters, intimate dialogue, and emotional vulnerability.",
+    "history": [],
+    "expected_positive_genres": ["romance", "drama"],
+    "expected_positive_keywords": ["heartfelt", "mature", "intimate", "dialogue", "vulnerable"],
+    "discourage_genres": ["action", "superhero", "horror"],
+    "discourage_terms": ["explosion", "battle", "gore"],
+    "avoid_titles": [],
+    "requires_history_signal": false,
+    "why_it_matters": "Measures emotional resonance and specificity versus generic blurbs."
   },
   {
     "id": "spy_adult_tension",
-    "category": "diversity",
+    "category": "description-persuadability",
     "user_id": 120015,
     "preferences": "I want a sleek adult spy thriller with tension, betrayal, and a polished modern style.",
     "history": [],
@@ -243,20 +187,6 @@
     "discourage_genres": ["family", "animation"],
     "avoid_titles": [],
     "requires_history_signal": false,
-    "why_it_matters": "A good benchmark for metadata use because keywords and overview matter more than raw popularity here."
-  },
-  {
-    "id": "faith_music_family",
-    "category": "diversity",
-    "user_id": 120016,
-    "preferences": "Recommend a family-safe movie with music, faith, and a sincere uplifting tone.",
-    "history": [],
-    "expected_positive_genres": ["family", "music", "drama", "animation"],
-    "expected_positive_keywords": ["faith", "uplifting", "music", "family"],
-    "discourage_genres": ["crime", "horror", "raunchy comedy"],
-    "avoid_titles": [],
-    "discourage_terms": ["serial killer", "drug cartel", "gore"],
-    "requires_history_signal": false,
-    "why_it_matters": "This exposes whether the new retriever can surface less mainstream but better-matching titles from the full dataset."
+    "why_it_matters": "Checks whether description persuasion remains strong in action-adjacent requests."
   }
 ]

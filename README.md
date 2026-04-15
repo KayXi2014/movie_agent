@@ -124,21 +124,22 @@ Some ideas to get you started:
 
 ## What Changed From `llm_baseline.py`
 
-The baseline recommender sends one large prompt to the LLM using only the 40 most-voted movies in the dataset. It includes limited metadata per movie and asks the model to handle retrieval, ranking, and blurb generation in one shot.
+The baseline recommender sends one large prompt to the LLM using only the 40 most-voted movies in the dataset. It asks the model to do retrieval, ranking, and description writing all at once.
 
-The new `llm.py` uses a hybrid pipeline instead:
+The new `llm.py` is more systematic and retrieval-heavy:
 
-- It uses the full TMDB top-1000 dataset instead of only the top 40 most-voted movies, which expands coverage beyond blockbuster-heavy titles.
-- It starts with a broad heuristic prefilter over the full dataset, so the LLM no longer has to search the entire candidate set by itself.
-- It runs a first LLM pass to extract a structured user profile from the request and watch history. That profile includes target genres, preferred tones, preferred themes, negative constraints, and history-derived signals such as liked actors or directors.
-- It then reranks candidates using that structured profile, which makes the system less rigid than pure keyword scoring and better at handling natural-language requests like “feel-good buddy cop”, “not another Marvel team-up”, or “dark fantasy for adults”.
-- It resolves watch history primarily by `tmdb_id`, with title matching as a fallback. This makes history handling more robust even if the movie name is entered inconsistently.
-- It uses more metadata from the dataset, including `keywords`, `tagline`, `director`, `top_cast`, `original_language`, and production information, not just title, genres, and overview.
-- It sends only a short ranked shortlist into the final recommendation prompt, which gives the LLM a cleaner decision set and reduces prompt clutter.
-- It adds response caching and a reusable Ollama client so repeated requests are faster and more stable.
-- It adds stronger fallback behavior. If profile extraction or final selection fails, the system still returns the top deterministic candidate from the reranked shortlist instead of crashing.
+- It uses the full TMDB top-1000 dataset instead of only the top 40, so coverage is much broader.
+- It performs heuristic heavy-lifting first (PhraseRules + BM25-like token scoring + metadata signals), so the shortlist is already high quality before the LLM is called.
+- It resolves watch history by `tmdb_id` first, with normalized title matching and limited TMDB fallback for robustness.
+- It treats watch history mainly as an exclusion and novelty signal, so already-seen or overly similar picks are pushed down unless they strongly match explicit current preferences.
+- It can enrich top candidates with TMDB metadata (`TMDB_ENRICH_TOP_N`) before final ranking.
+- It sends only a compact shortlist to the LLM to reduce token usage and latency.
+- It uses one primary LLM decision call that returns `selection` only (winning `tmdb_id` and persuasive description) to reduce output-token latency.
+- It enforces an explicit decision order in the prompt: identify mood, filter by avoid constraints, then pick a winner.
+- It includes a short retry prompt if the primary call fails, and falls back to the top heuristic candidate if LLM selection still fails.
+- It adds caching and timing logs to improve repeat-request speed and debugging visibility.
 
-In short, `llm_baseline.py` is a one-shot prompt over a small popularity-skewed candidate pool, while `llm.py` is a two-stage recommendation system: prefilter first, extract a taste profile, rerank with that profile, then let the LLM make the final pick from a much better shortlist.
+In short, `llm_baseline.py` is LLM-first on a small pool, while `llm.py` is retrieval-first on a large pool with one primary structured LLM decision step.
 
 ## Evaluation Setup
 
