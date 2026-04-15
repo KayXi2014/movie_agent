@@ -32,16 +32,15 @@ SHORTLIST_SIZE = 5
 logger = logging.getLogger(__name__)
 
 MODEL = "gemini-3-flash-preview"
-TMDB_ENRICH_TOP_N = 1
-SELECTION_LLM_TIMEOUT_SECONDS = 10.0
-LLM_STAGE_BUDGET_SECONDS = 18.0
-SELECTION_RETRY_TIMEOUT_SECONDS = 4.0
-SELECTION_RETRY_RESERVED_SECONDS = 2.0
-FAST_FAIL_RETRY_TIMEOUT_SECONDS = 8.0
-FAST_FAIL_PRIMARY_SECONDS = 1.0
-# Keep primary bounded so retry gets a real chance when the model stalls.
-PRIMARY_SELECTION_TIMEOUT_SECONDS = 8.0
-MIN_RETRY_WINDOW_SECONDS = 4.0
+TMDB_ENRICH_TOP_N = 0 # disabled to save runtime
+SELECTION_LLM_TIMEOUT_SECONDS = 12.0      # was 10.0 — more headroom for primary
+LLM_STAGE_BUDGET_SECONDS = 22.0           # was 18.0 — overall budget increase
+SELECTION_RETRY_TIMEOUT_SECONDS = 6.0     # was 4.0 — your retry hit 4.3s and timed out
+SELECTION_RETRY_RESERVED_SECONDS = 2.0    # keep as is
+FAST_FAIL_RETRY_TIMEOUT_SECONDS = 10.0    # was 8.0 — fast-fail recovery gets more time
+FAST_FAIL_PRIMARY_SECONDS = 1.0           # keep as is
+PRIMARY_SELECTION_TIMEOUT_SECONDS = 12.0  # was 10.0 — align with SELECTION_LLM_TIMEOUT
+MIN_RETRY_WINDOW_SECONDS = 4.0            # keep as is
 HISTORY_INFLUENCE = 0.15
 HISTORY_NOVELTY_PENALTY = 1.2
 BM25_K1 = 1.2
