@@ -124,18 +124,36 @@ Some ideas to get you started:
 
 ## What Changed From `llm_baseline.py`
 
-The baseline recommender sends one large prompt to the LLM using only the 40 most-voted movies in the dataset. It includes a small amount of metadata for each movie and asks the model to do retrieval, ranking, and description writing in a single step.
+The baseline recommender sends one large prompt to the LLM using only the 40 most-voted movies in the dataset. It includes limited metadata per movie and asks the model to handle retrieval, ranking, and blurb generation in one shot.
 
-The improved recommender in `llm.py` makes several changes:
+The new `llm.py` uses a hybrid pipeline instead:
 
-- It uses the full TMDB top-1000 dataset instead of only the top 40 most-voted movies, which gives the system access to more niche and less blockbuster-skewed options.
-- It adds a retrieval-and-ranking stage before the LLM call. Instead of asking the model to search the whole list itself, the code scores movies first based on users input and builds a short shortlist of the best candidates.
+- It uses the full TMDB top-1000 dataset instead of only the top 40 most-voted movies, which expands coverage beyond blockbuster-heavy titles.
+- It starts with a broad heuristic prefilter over the full dataset, so the LLM no longer has to search the entire candidate set by itself.
+- It runs a first LLM pass to extract a structured user profile from the request and watch history. That profile includes target genres, preferred tones, preferred themes, negative constraints, and history-derived signals such as liked actors or directors.
+- It then reranks candidates using that structured profile, which makes the system less rigid than pure keyword scoring and better at handling natural-language requests like “feel-good buddy cop”, “not another Marvel team-up”, or “dark fantasy for adults”.
+- It resolves watch history primarily by `tmdb_id`, with title matching as a fallback. This makes history handling more robust even if the movie name is entered inconsistently.
 - It uses more metadata from the dataset, including `keywords`, `tagline`, `director`, `top_cast`, `original_language`, and production information, not just title, genres, and overview.
-- It treats watch history as a taste signal, not only a blocklist. The recommender extracts genres, keywords, directors, actors, and franchise clues from watched movies to bias future picks toward similar movies while still avoiding exact repeats.
-- It now resolves watch history primarily by `tmdb_id`, with title matching as a fallback. This makes history handling more robust even when the movie name is formatted inconsistently.
-- It improves prompt design by giving the LLM a smaller, cleaner shortlist plus watch-history context about favored actors and directors, rather than one oversized prompt over all candidates.
+- It sends only a short ranked shortlist into the final recommendation prompt, which gives the LLM a cleaner decision set and reduces prompt clutter.
 - It adds response caching and a reusable Ollama client so repeated requests are faster and more stable.
-- It adds stronger error handling and fallback behavior. If the LLM fails, returns invalid JSON, or picks a movie outside the shortlist, the system falls back to the highest-ranked heuristic candidate instead of crashing.
+- It adds stronger fallback behavior. If profile extraction or final selection fails, the system still returns the top deterministic candidate from the reranked shortlist instead of crashing.
+
+In short, `llm_baseline.py` is a one-shot prompt over a small popularity-skewed candidate pool, while `llm.py` is a two-stage recommendation system: prefilter first, extract a taste profile, rerank with that profile, then let the LLM make the final pick from a much better shortlist.
+
+## Evaluation Setup
+
+The repo includes an offline benchmark in `benchmark_recommender.py` and a fixed evaluation set in `evaluation_cases.json`.
+
+The benchmark compares the baseline-style top-40 retriever against the new pipeline using several signals:
+
+- constraint pass rate: avoid watched titles and avoid explicit blocked titles or franchises
+- genre and theme match: whether the recommendation matches the target genres and metadata keywords in each case
+- discourage penalties: whether the result drifts into genres or themes the prompt explicitly asks to avoid
+- history-aware behavior: whether cases that depend on prior watch history preserve useful taste signals
+- diversity: how many unique titles are recommended across the whole benchmark
+- average movie rating: a weak proxy for general movie quality, used only as supporting evidence
+
+This benchmark is meant to be a repeatable offline comparison tool, while final recommendation quality should still be validated with blind human preference testing on sampled requests.
 
 
 ---

@@ -23,8 +23,8 @@ def normalize_history(history: list[dict[str, Any]]) -> tuple[tuple[int | None, 
 
 def baseline_pick(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
     baseline_movies = llm.MOVIES.nlargest(40, "vote_count").copy()
-    profile = llm._derive_user_profile(preferences, history)
-    baseline_movies["score"] = baseline_movies.apply(llm._score_movie, axis=1, profile=profile)
+    profile = llm._build_base_profile(preferences, history)
+    baseline_movies["score"] = baseline_movies.apply(llm._prefilter_score, axis=1, profile=profile)
     ranked = baseline_movies.sort_values(["score", "vote_average", "vote_count"], ascending=False)
     top = ranked.iloc[0]
     return {
@@ -36,7 +36,7 @@ def baseline_pick(preferences: str, history: tuple[tuple[int | None, str], ...])
 
 
 def improved_pick(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
-    shortlist = llm._build_shortlist(preferences, history)
+    shortlist, _user_profile, _base_profile = llm._build_shortlist(preferences, history)
     top = shortlist[0]
     return {
         "tmdb_id": int(top["tmdb_id"]),
