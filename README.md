@@ -57,6 +57,25 @@ curl -X POST http://localhost:8000/recommend \
 
 Note that the port (8000 here) must be the same one that your app is listening on.
 
+**5. Optional: Run the Streamlit UI**
+
+This repo includes a separate Streamlit frontend in `streamlit_ui.py` so you can use the recommender from a browser form instead of scripts.
+
+Start it in a second terminal (with the same virtual environment activated):
+
+```bash
+streamlit run streamlit_ui.py
+```
+
+Then open the Streamlit URL shown in your terminal (usually `http://localhost:8501`).
+
+The UI lets you enter:
+- `user_id`
+- free-text `preferences`
+- watch history rows (`tmdb_id` + `name`)
+
+By default it sends requests to `http://127.0.0.1:8000/recommend`, which matches the local FastAPI server.
+
 ---
 
 ## Deploying to Leapcell
