@@ -8,7 +8,9 @@
     "expected_positive_genres": ["romance", "drama", "history"],
     "expected_positive_keywords": ["period", "romantic", "historical", "bittersweet"],
     "discourage_genres": ["action", "superhero"],
+    "discourage_terms": ["superhero", "buddy cop", "marvel"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "The baseline top-40 pool is weak on period romance, so this checks whether retrieval beyond blockbuster-heavy titles helps."
   },
   {
@@ -20,7 +22,9 @@
     "expected_positive_genres": ["horror", "mystery", "thriller"],
     "expected_positive_keywords": ["ghost", "haunted", "paranormal", "dread"],
     "discourage_genres": ["comedy", "animation"],
+    "discourage_terms": ["family-friendly", "uplifting"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "The baseline often drifts to generic thrillers when the request is horror-specific."
   },
   {
@@ -32,7 +36,9 @@
     "expected_positive_genres": ["animation", "family", "music"],
     "expected_positive_keywords": ["music", "family", "uplifting", "heartfelt"],
     "discourage_genres": ["war", "crime", "horror"],
+    "discourage_terms": ["violent", "serial killer", "gore"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "Checks whether the new ranking uses metadata well enough to stay inside family-friendly musical territory."
   },
   {
@@ -45,6 +51,7 @@
     "expected_positive_keywords": ["heist", "detective", "police", "cat-and-mouse"],
     "discourage_genres": ["fantasy", "animation"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "Useful for comparing focused crime retrieval versus generic popular titles."
   },
   {
@@ -62,6 +69,8 @@
     "expected_positive_keywords": ["mind-bending", "future", "character", "ideas"],
     "discourage_genres": ["comedy"],
     "avoid_titles": ["Interstellar"],
+    "avoid_title_roots": ["interstellar"],
+    "requires_history_signal": true,
     "why_it_matters": "Verifies that watched movies are not repeated while preserving taste from history."
   },
   {
@@ -83,6 +92,9 @@
     "expected_positive_keywords": ["spectacle", "fun", "adventure"],
     "discourage_genres": ["superhero"],
     "avoid_titles": ["The Avengers", "Avengers: Infinity War", "Avengers: Endgame", "Avengers: Age of Ultron"],
+    "avoid_title_roots": ["avengers"],
+    "discourage_terms": ["marvel", "superhero team"],
+    "requires_history_signal": true,
     "why_it_matters": "Checks whether history is used to avoid obvious same-franchise repeats rather than recommending the next Avengers movie."
   },
   {
@@ -104,6 +116,8 @@
     "expected_positive_keywords": ["cerebral", "ambitious", "mind-bending"],
     "discourage_genres": ["family", "broad comedy"],
     "avoid_titles": ["Interstellar", "Inception"],
+    "avoid_title_roots": ["interstellar", "inception"],
+    "requires_history_signal": true,
     "why_it_matters": "Measures whether history is treated as a taste profile rather than just a blocklist."
   },
   {
@@ -121,6 +135,8 @@
     "expected_positive_keywords": ["stylish", "moody", "cool"],
     "discourage_genres": ["animation", "fantasy"],
     "avoid_titles": ["Drive"],
+    "avoid_title_roots": ["drive"],
+    "requires_history_signal": true,
     "why_it_matters": "Tests whether cast and tone from history can nudge the ranking without repeating the watched title."
   },
   {
@@ -138,6 +154,8 @@
     "expected_positive_keywords": ["coming of age", "female lead", "witty", "emotional"],
     "discourage_genres": ["action", "superhero"],
     "avoid_titles": ["Lady Bird"],
+    "avoid_title_roots": ["lady bird"],
+    "requires_history_signal": true,
     "why_it_matters": "A stronger recommender should carry forward the tone and authorship cues from the watch history."
   },
   {
@@ -150,6 +168,8 @@
     "expected_positive_keywords": ["family", "intimate", "realistic", "foreign-language"],
     "discourage_genres": ["superhero", "broad comedy"],
     "avoid_titles": [],
+    "prefer_non_english": true,
+    "requires_history_signal": false,
     "why_it_matters": "Checks whether the full-dataset retrieval opens up less mainstream, non-English options."
   },
   {
@@ -162,6 +182,7 @@
     "expected_positive_keywords": ["sports", "underdog", "teamwork", "heart"],
     "discourage_genres": ["horror", "crime"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "The baseline pool is poor at family sports stories, so this highlights candidate-pool expansion."
   },
   {
@@ -174,6 +195,8 @@
     "expected_positive_keywords": ["dark", "adult", "ominous", "fantasy"],
     "discourage_genres": ["family", "animation"],
     "avoid_titles": [],
+    "discourage_terms": ["kid-friendly", "wholesome"],
+    "requires_history_signal": false,
     "why_it_matters": "Useful for checking whether the description and ranking honor tone rather than just matching a broad genre word."
   },
   {
@@ -186,6 +209,8 @@
     "expected_positive_keywords": ["chemistry", "funny", "rom-com", "dialogue"],
     "discourage_genres": ["action", "thriller"],
     "avoid_titles": [],
+    "discourage_terms": ["superhero", "explosion", "battle"],
+    "requires_history_signal": false,
     "why_it_matters": "Checks that the model does not over-index on popularity and accidentally suggest action-heavy titles."
   },
   {
@@ -203,6 +228,8 @@
     "expected_positive_keywords": ["memory", "family", "moving", "animated"],
     "discourage_genres": ["crime", "horror"],
     "avoid_titles": ["Coco"],
+    "avoid_title_roots": ["coco"],
+    "requires_history_signal": true,
     "why_it_matters": "Directly tests the no-repeat rule on a query where the watched title would otherwise be very tempting."
   },
   {
@@ -215,6 +242,7 @@
     "expected_positive_keywords": ["spy", "betrayal", "tension", "sleek"],
     "discourage_genres": ["family", "animation"],
     "avoid_titles": [],
+    "requires_history_signal": false,
     "why_it_matters": "A good benchmark for metadata use because keywords and overview matter more than raw popularity here."
   },
   {
@@ -227,6 +255,8 @@
     "expected_positive_keywords": ["faith", "uplifting", "music", "family"],
     "discourage_genres": ["crime", "horror", "raunchy comedy"],
     "avoid_titles": [],
+    "discourage_terms": ["serial killer", "drug cartel", "gore"],
+    "requires_history_signal": false,
     "why_it_matters": "This exposes whether the new retriever can surface less mainstream but better-matching titles from the full dataset."
   }
 ]

@@ -21,7 +21,7 @@ import ollama
 import pandas as pd
 
 MODEL = os.environ.get("OLLAMA_MODEL", "gemini-3-flash-preview")
-LLM_CLIENT_TIMEOUT_SECONDS = 10
+LLM_CLIENT_TIMEOUT_SECONDS = 20
 logger = logging.getLogger(__name__)
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "tmdb_top1000_movies.csv")

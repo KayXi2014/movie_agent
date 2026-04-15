@@ -122,6 +122,22 @@ Some ideas to get you started:
 - Experiment with prompt phrasing — chain-of-thought or few-shot examples often improve output quality.
 - Cache responses for identical inputs to stay safely under the 5-second deadline.
 
+## What Changed From `llm_baseline.py`
+
+The baseline recommender sends one large prompt to the LLM using only the 40 most-voted movies in the dataset. It includes a small amount of metadata for each movie and asks the model to do retrieval, ranking, and description writing in a single step.
+
+The improved recommender in `llm.py` makes several changes:
+
+- It uses the full TMDB top-1000 dataset instead of only the top 40 most-voted movies, which gives the system access to more niche and less blockbuster-skewed options.
+- It adds a retrieval-and-ranking stage before the LLM call. Instead of asking the model to search the whole list itself, the code scores movies first based on users input and builds a short shortlist of the best candidates.
+- It uses more metadata from the dataset, including `keywords`, `tagline`, `director`, `top_cast`, `original_language`, and production information, not just title, genres, and overview.
+- It treats watch history as a taste signal, not only a blocklist. The recommender extracts genres, keywords, directors, actors, and franchise clues from watched movies to bias future picks toward similar movies while still avoiding exact repeats.
+- It now resolves watch history primarily by `tmdb_id`, with title matching as a fallback. This makes history handling more robust even when the movie name is formatted inconsistently.
+- It improves prompt design by giving the LLM a smaller, cleaner shortlist plus watch-history context about favored actors and directors, rather than one oversized prompt over all candidates.
+- It adds response caching and a reusable Ollama client so repeated requests are faster and more stable.
+- It adds stronger error handling and fallback behavior. If the LLM fails, returns invalid JSON, or picks a movie outside the shortlist, the system falls back to the highest-ranked heuristic candidate instead of crashing.
+
+
 ---
 
 ## Key libraries
