@@ -7,7 +7,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from llm import get_recommendation
+from llm import _extract_query_hints_cached
+from retrieval import build_shortlist, normalize_history
 
 
 @st.cache_data
@@ -73,24 +74,63 @@ def render_result(data: dict[str, Any], elapsed: float, source_label: str) -> No
     movie_title = lookup_title(tmdb_id)
     st.markdown(f"### 🎬 {movie_title}")
 
-    used_llm = data.get("used_llm")
-    if used_llm is None:
-        st.info("LLM path: not exposed by the API response")
-    else:
-        indicator = "LLM used" if bool(used_llm) else "Fallback used"
-        st.caption(f"LLM path: {indicator}")
-
     st.write(data.get("description", ""))
 
 
+def render_shortlist_debug(payload: dict[str, Any]) -> None:
+    normalized_history = normalize_history(payload["history"])
+    try:
+        query_hints, avoid_hints = _extract_query_hints_cached(payload["preferences"])
+    except Exception:
+        query_hints, avoid_hints = (), ()
+    shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
+        payload["preferences"],
+        normalized_history,
+        query_hints=query_hints,
+        avoid_hints=avoid_hints,
+    )
+
+    st.markdown("### Retrieval Debug")
+    st.caption(
+        f"Retrieval mode: {retrieval_profile.get('retrieval_mode', 'unknown')} | "
+        f"Candidates shown: {len(shortlist_refs)}"
+    )
+
+    if prompt_profile.get("preferred_themes") or prompt_profile.get("avoid") or prompt_profile.get("target_genres") or query_hints:
+        debug_summary = {
+            "query_hints": list(query_hints),
+            "avoid_hints": list(avoid_hints),
+            "target_genres": prompt_profile.get("target_genres", []),
+            "preferred_tones": prompt_profile.get("preferred_tones", []),
+            "preferred_themes": prompt_profile.get("preferred_themes", []),
+            "avoid": prompt_profile.get("avoid", []),
+        }
+        st.code(json.dumps(debug_summary, indent=2), language="json")
+
+    shortlist_rows = []
+    for rank, movie in enumerate(shortlist_refs, start=1):
+        shortlist_rows.append(
+            {
+                "rank": rank,
+                "tmdb_id": movie["tmdb_id"],
+                "title": movie["title"],
+                "score": movie.get("score"),
+                "semantic": movie.get("semantic_score"),
+                "fts": movie.get("fts_score"),
+            }
+        )
+
+    st.dataframe(pd.DataFrame(shortlist_rows), use_container_width=True, hide_index=True)
+
+
 st.title("Movie Recommender")
-st.caption("Frontend for the FastAPI movie recommendation endpoint, with optional local debug info.")
+st.caption("Frontend for the FastAPI movie recommendation endpoint, with optional retrieval debug info.")
 
 with st.sidebar:
     st.header("API Settings")
     api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8000")
     request_timeout = st.number_input("Request timeout (seconds)", min_value=1, max_value=120, value=25)
-    show_local_debug = st.checkbox("Show local used_llm indicator", value=True)
+    show_local_debug = st.checkbox("Show local debug run", value=True)
 
 st.subheader("User Inputs")
 
@@ -173,20 +213,17 @@ if st.button("Get Recommendation", type="primary"):
             elapsed = time.perf_counter() - start_time
             if response.ok:
                 api_data = response.json()
+                st.markdown("## API Result")
+                st.caption("This is the backend's actual HTTP response.")
                 render_result(api_data, elapsed, "API")
 
                 if show_local_debug:
-                    debug_start = time.perf_counter()
+                    st.markdown("## Retrieval Debug")
+                    st.caption("This debug panel is generated locally from the retrieval pipeline only. It does not trigger a second recommendation call.")
                     try:
-                        local_result = get_recommendation(payload["preferences"], payload["history"])
+                        render_shortlist_debug(payload)
                     except Exception as exc:
-                        debug_elapsed = time.perf_counter() - debug_start
-                        st.warning(f"Local debug run failed: {exc}")
-                        st.caption(f"Local debug attempt time: {debug_elapsed:.2f}s")
-                    else:
-                        debug_elapsed = time.perf_counter() - debug_start
-                        st.markdown("### Local Debug")
-                        render_result(local_result, debug_elapsed, "Local")
+                        st.warning(f"Retrieval debug failed: {exc}")
             else:
                 try:
                     error_body = response.json()

@@ -54,6 +54,7 @@ STOP_WORDS = {
     "be",
     "but",
     "could",
+    "completely",
     "for",
     "find",
     "from",
@@ -65,6 +66,8 @@ STOP_WORDS = {
     "into",
     "is",
     "it",
+    "ive",
+    "i've",
     "like",
     "love",
     "me",
@@ -73,6 +76,7 @@ STOP_WORDS = {
     "must",
     "no",
     "of",
+    "off",
     "on",
     "or",
     "sound",
@@ -84,6 +88,10 @@ STOP_WORDS = {
     "thats",
     "the",
     "to",
+    "been",
+    "different",
+    "give",
+    "lately",
     "want",
     "watch",
     "would",
@@ -578,7 +586,12 @@ def history_prompt_text(history_count: int) -> str:
     return "none" if history_count <= 0 else f"known_watch_history_count={history_count}; use history primarily to avoid re-recommending already watched titles"
 
 
-def build_retrieval_profile(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
+def build_retrieval_profile(
+    preferences: str,
+    history: tuple[tuple[int | None, str], ...],
+    query_hints: tuple[str, ...] = (),
+    avoid_hints: tuple[str, ...] = (),
+) -> dict[str, Any]:
     history_df = history_rows(history)
     raw_preference_tokens = tokenize(preferences)
     history_signals = derive_history_signals(history_df)
@@ -588,15 +601,33 @@ def build_retrieval_profile(preferences: str, history: tuple[tuple[int | None, s
     seed_signals = derive_seed_signals(seed_df)
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
 
-    positive_query_tokens = set(negation_context["positive_query_tokens"])
+    query_hint_tokens = set()
+    for hint in query_hints:
+        query_hint_tokens.update(tokenize(hint))
+        explicit_genre_targets.update(extract_explicit_genre_targets(hint))
+
+    if query_hint_tokens:
+        positive_query_tokens = set(query_hint_tokens)
+    else:
+        positive_query_tokens = set(negation_context["positive_query_tokens"])
     positive_query_tokens.difference_update(seed_signals["seed_title_tokens"])
+
+    for genre in explicit_genre_targets:
+        positive_query_tokens.update(tokenize(genre))
+
+    negative_tokens = set(negation_context["negative_tokens"])
+    for hint in avoid_hints:
+        negative_tokens.update(tokenize(hint))
 
     seed_query_tokens = derive_seed_query_tokens(seed_signals)
     if similarity_request:
         positive_query_tokens.update(seed_query_tokens)
 
     lexical_query_text = " ".join(sorted(positive_query_tokens))
-    semantic_query_text = lexical_query_text or str(preferences or "").strip()
+    semantic_hint_text = " ".join(query_hints).strip()
+    semantic_query_text = " ".join(part for part in [str(preferences or "").strip(), semantic_hint_text] if part).strip()
+    if not semantic_query_text:
+        semantic_query_text = lexical_query_text
 
     return {
         "history_df": history_df,
@@ -607,11 +638,14 @@ def build_retrieval_profile(preferences: str, history: tuple[tuple[int | None, s
         "raw_preference_tokens": raw_preference_tokens,
         "explicit_genre_targets": explicit_genre_targets,
         **negation_context,
+        "negative_tokens": negative_tokens,
         "positive_query_tokens": positive_query_tokens,
         "lexical_query_text": lexical_query_text,
         "semantic_query_text": semantic_query_text,
         "similarity_request": similarity_request,
         "exclude_seed_tmdb_ids": seed_signals["seed_tmdb_ids"] if similarity_request else set(),
+        "query_hints": query_hints,
+        "avoid_hints": avoid_hints,
         **seed_signals,
         "seed_query_tokens": seed_query_tokens,
         **history_signals,
@@ -627,7 +661,7 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
         "preferred_tones": sorted(retrieval_profile["subjective_tokens"])[:4],
         "preferred_themes": preferred_themes,
-        "avoid": retrieval_profile["negative_phrases"][:6],
+        "avoid": (retrieval_profile["negative_phrases"] + list(retrieval_profile.get("avoid_hints", ())))[:6],
         "history_signals": {
             "liked_genres": sorted(retrieval_profile["liked_genres"])[:6],
             "liked_directors": sorted(retrieval_profile["liked_directors"])[:4],
@@ -835,8 +869,10 @@ def build_candidate_pool(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
+    query_hints: tuple[str, ...] = (),
+    avoid_hints: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, dict[str, Any], str]:
-    retrieval_profile = build_retrieval_profile(preferences, history)
+    retrieval_profile = build_retrieval_profile(preferences, history, query_hints=query_hints, avoid_hints=avoid_hints)
     lexical_query_text = build_query_text(preferences, retrieval_profile)
     semantic_query_text = retrieval_profile["semantic_query_text"]
     exclude_ids = set(retrieval_profile["history_tmdb_ids"])
@@ -864,8 +900,16 @@ def build_shortlist(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
+    query_hints: tuple[str, ...] = (),
+    avoid_hints: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode)
+    candidates, retrieval_profile, resolved_mode = build_candidate_pool(
+        preferences,
+        history,
+        mode=mode,
+        query_hints=query_hints,
+        avoid_hints=avoid_hints,
+    )
     prompt_profile = build_prompt_profile(preferences, retrieval_profile)
 
     reranked = candidates.head(SECOND_STAGE_POOL_SIZE).copy()

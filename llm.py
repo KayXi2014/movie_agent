@@ -33,6 +33,7 @@ from retrieval import (
 
 
 LLM_STAGE_BUDGET_SECONDS = 18.0
+QUERY_HINT_TIMEOUT_SECONDS = 6.0
 SELECTION_LLM_TIMEOUT_SECONDS = 12.0
 MODEL = "gemma4:31b-cloud"
 logger = logging.getLogger(__name__)
@@ -123,6 +124,72 @@ def _resolve_selected_tmdb_id(selection_payload: dict[str, Any], shortlist: list
     raise ValueError(f"Model did not return a usable shortlist selection: {selection_payload}")
 
 
+def _build_query_hint_prompt(preferences: str) -> str:
+    return (
+        "Extract short retrieval hints from this movie request.\n"
+        "Return raw JSON only.\n"
+        'Format: {"must_have": ["..."], "avoid": ["..."]}\n'
+        "Rules: include 3 to 6 short must-have hints grounded in genre, source material, tone, theme, story setup, or format. "
+        "Include avoid only for explicit constraints. Convert vague requests into concrete movie traits. "
+        "Do not include filler or discourse words like good, great, interesting, find me, lately, different, completely, been, or must have unless they point to a concrete movie trait. "
+        "If the user wants novelty, express that as concrete traits or contrasts, not as words like different or new.\n\n"
+        f"Request: {preferences}"
+    )
+
+
+def _sanitize_query_hints(payload: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    banned = {
+        "been",
+        "completely",
+        "different",
+        "find me",
+        "good",
+        "great",
+        "interesting",
+        "give",
+        "i've",
+        "ive",
+        "lately",
+        "movie",
+        "movies",
+        "must have",
+        "new",
+    }
+
+    def _coerce_list(value: Any, limit: int) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        cleaned: list[str] = []
+        for item in value:
+            text = " ".join(str(item or "").strip().split())
+            if not text:
+                continue
+            normalized = _normalize_text(text)
+            if normalized in banned:
+                continue
+            if normalized not in cleaned:
+                cleaned.append(normalized)
+            if len(cleaned) >= limit:
+                break
+        return tuple(cleaned)
+
+    return _coerce_list(payload.get("must_have"), 6), _coerce_list(payload.get("avoid"), 4)
+
+
+@lru_cache(maxsize=256)
+def _extract_query_hints_cached(preferences: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    prompt = _build_query_hint_prompt(preferences)
+    response = _get_client(QUERY_HINT_TIMEOUT_SECONDS).chat(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        format="json",
+    )
+    payload = _extract_json_object(response.message.content)
+    if isinstance(payload.get("query"), dict):
+        payload = payload["query"]
+    return _sanitize_query_hints(payload)
+
+
 def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
@@ -165,7 +232,7 @@ def _build_selection_prompt(
         f"{shortlist_text}\n\n"
         "Pick the best fit and write like a sharp, thoughtful friend.\n"
         "Be concrete, direct, and persuasive.\n"
-        "Only use support that is visible in the candidate line. Do not invent soundtrack, score, acclaim, awards, or adaptation details beyond what is shown.\n"
+        "Only make claims that are supported by the candidate line and the user's request. Do not invent extra facts or qualities that are not grounded in the provided information.\n"
         "Return raw JSON only.\n"
         'Format: {"tmdb_id": <candidate id>, "title": "<exact shortlisted title>", "description": "<2 or 3 sentences, under 500 chars>"}\n'
         "Description rules: sentence 1 gives a vivid premise hook; sentence 2 explains why it matches this request; sentence 3 is optional. "
@@ -273,7 +340,22 @@ def _choose_with_llm(
 
 @lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
-    shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
+    try:
+        query_hints, avoid_hints = _extract_query_hints_cached(preferences)
+    except Exception as exc:
+        logger.warning(
+            "Falling back to raw retrieval query: preferences_len=%d error=%s",
+            len(preferences),
+            exc,
+        )
+        query_hints, avoid_hints = (), ()
+
+    shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(
+        preferences,
+        history,
+        query_hints=query_hints,
+        avoid_hints=avoid_hints,
+    )
     shortlist = _enrich_shortlist(shortlist_refs)
     if not shortlist:
         raise ValueError("No candidate movies available")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from functools import lru_cache
 from typing import Any
 
@@ -33,8 +34,8 @@ def fts_ready() -> bool:
     return metadata_matches(metadata, ACTIVE_DATA_PATH)
 
 
-@lru_cache(maxsize=1)
-def _get_connection() -> sqlite3.Connection:
+@lru_cache(maxsize=8)
+def _get_connection(thread_id: int) -> sqlite3.Connection:
     connection = sqlite3.connect(str(RETRIEVAL_DB_PATH))
     connection.row_factory = sqlite3.Row
     return connection
@@ -69,7 +70,7 @@ def search_fts(query_text: str, exclude_ids: set[int] | None = None, limit: int 
         LIMIT ?
     """
 
-    rows = _get_connection().execute(sql, params).fetchall()
+    rows = _get_connection(threading.get_ident()).execute(sql, params).fetchall()
     if not rows:
         return []
 
