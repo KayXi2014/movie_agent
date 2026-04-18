@@ -3,8 +3,8 @@
   "embedding_dim": 384,
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
   "row_count": 1000,
-  "source_name": "tmdb_top1000_movies.csv",
-  "source_path": "tmdb_top1000_movies.csv",
-  "source_sha256": "feac8e8ac58b42be50756ce0568a740ff4db83a549a6cf3d08433d210d83064b",
-  "source_size": 816819
+  "source_name": "tmdb_top1000_movies_enriched.csv",
+  "source_path": "tmdb_top1000_movies_enriched.csv",
+  "source_sha256": "7f43a6db12773d4db4fd195a7dff2b343c388e9938d37f5a54daba7f2c2fc2dd",
+  "source_size": 1063367
 }

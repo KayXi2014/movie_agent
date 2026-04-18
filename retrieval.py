@@ -5,7 +5,6 @@ import json
 import re
 import sqlite3
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +49,8 @@ STOP_WORDS = {
     "and",
     "are",
     "be",
+    "but",
+    "could",
     "for",
     "from",
     "i",
@@ -62,9 +63,11 @@ STOP_WORDS = {
     "love",
     "movie",
     "movies",
+    "no",
     "of",
     "on",
     "or",
+    "sound",
     "something",
     "stories",
     "story",
@@ -73,42 +76,9 @@ STOP_WORDS = {
     "to",
     "want",
     "watch",
+    "would",
     "with",
 }
-
-
-@dataclass
-class PhraseRule:
-    pattern: re.Pattern
-    hints: list[str]
-
-
-@dataclass
-class NegativeRule:
-    pattern: re.Pattern
-    hints: list[str]
-
-
-PHRASE_RULES: list[PhraseRule] = [
-    PhraseRule(re.compile(r"\b(superhero|super.?hero|comic.?book|cape|vigilante|masked)\b"), ["superhero", "hero", "powers", "vigilante", "marvel", "dc"]),
-    PhraseRule(re.compile(r"\b(buddy.?cop|partner|detective|police.?comedy|cop.?comedy)\b"), ["buddy cop", "cop", "detective", "police", "partners"]),
-    PhraseRule(re.compile(r"\b(rom.?com|romantic.?comedy|love.?story|romance)\b"), ["romance", "comedy", "romantic", "chemistry", "funny"]),
-    PhraseRule(re.compile(r"\b(feel.?good|uplifting|heartwarming|wholesome|life.?affirming)\b"), ["uplifting", "heartwarming", "friendship", "hopeful", "fun"]),
-    PhraseRule(re.compile(r"\b(coming.?of.?age|grow.?up|teen|youth|adolescen)\b"), ["coming of age", "teen", "growing up", "youth"]),
-    PhraseRule(re.compile(r"\b(dark\s+fantasy|grimdark|dark.?fairy)\b"), ["dark", "ominous", "fantasy", "mature", "adult"]),
-    PhraseRule(re.compile(r"\b(mind.?bend|mindf\w+|twist|psychological|cerebral|complex.?plot|non.?linear)\b"), ["psychological", "twist", "cerebral", "ambitious", "complex"]),
-    PhraseRule(re.compile(r"\b(sci.?fi|science.?fiction|space\s+opera|dystop)\b"), ["science fiction", "space", "dystopia", "futuristic", "sci-fi"]),
-    PhraseRule(re.compile(r"\b(slow.?burn|atmospheric|arthouse|art.?film|indie)\b"), ["atmospheric", "slow burn", "indie", "arthouse"]),
-    PhraseRule(re.compile(r"\b(action.?pack|high.?octane|adrenaline|explosive|thrill)\b"), ["action", "thriller", "chase", "explosion", "fight"]),
-]
-
-NEGATIVE_RULES: list[NegativeRule] = [
-    NegativeRule(re.compile(r"(\b(no more|tired of|not another|sick of|done with|enough)\b.{0,40}\b(marvel|superhero|hero|avengers|cape|comic)\b)|\b(superhero.?fatigue|no.?capes?)\b", re.IGNORECASE), ["superhero", "marvel", "avengers", "dc", "hero"]),
-    NegativeRule(re.compile(r"(\b(not?|avoid|no)\b.{0,30}\b(action|explosion|war|combat|fight)\b)|\bno.?action\b", re.IGNORECASE), ["action", "explosion", "battle", "war", "combat"]),
-    NegativeRule(re.compile(r"\b(not?.?kid.?friendly|no.?kids?|adult.?only|not?.?for.?children|no.?animat|not?.?family)\b", re.IGNORECASE), ["family", "animation", "children", "kid", "animated"]),
-    NegativeRule(re.compile(r"\b(not?.?\bhorror\b|no.?horror|avoid.?horror|no.?gore|not?.?scary)\b", re.IGNORECASE), ["horror", "gore", "slasher", "scary"]),
-]
-
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -154,7 +124,11 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def normalize_text(value: Any) -> str:
-    return str(value or "").strip().lower()
+    text = str(value or "").strip().lower()
+    text = text.replace("sci-fi", "science fiction")
+    text = text.replace("sci fi", "science fiction")
+    text = text.replace("superpowers", "superpower")
+    return text
 
 
 def tokenize(value: Any) -> set[str]:
@@ -163,6 +137,30 @@ def tokenize(value: Any) -> set[str]:
 
 def split_csvish(value: Any) -> set[str]:
     return {part.strip().lower() for part in str(value or "").split(",") if part.strip()}
+
+
+def _intent_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif value:
+        items = [value]
+    else:
+        items = []
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def normalize_intent(intent: dict[str, Any] | None, preferences: str) -> dict[str, Any]:
+    payload = dict(intent or {})
+    query_text = str(payload.get("query_text") or "").strip() or str(preferences or "").strip()
+    must_have = _intent_list(payload.get("must_have"))
+    avoid = _intent_list(payload.get("avoid"))
+    tone = _intent_list(payload.get("tone"))
+    return {
+        "query_text": query_text,
+        "must_have": must_have,
+        "avoid": avoid,
+        "tone": tone,
+    }
 
 
 def title_root(title: Any) -> str:
@@ -397,19 +395,6 @@ def history_rows(history: tuple[tuple[int | None, str], ...]) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True).drop_duplicates(subset=["tmdb_id"])
 
 
-def extract_phrase_hints(preferences: str) -> tuple[set[str], set[str]]:
-    positive: set[str] = set()
-    negative: set[str] = set()
-    for rule in PHRASE_RULES:
-        if rule.pattern.search(preferences):
-            positive.update(rule.hints)
-    for rule in NEGATIVE_RULES:
-        if rule.pattern.search(preferences):
-            negative.update(rule.hints)
-            positive -= set(rule.hints)
-    return positive, negative
-
-
 def derive_history_signals(history_df: pd.DataFrame) -> dict[str, set[str]]:
     genre_counts: Counter[str] = Counter()
     cast_counts: Counter[str] = Counter()
@@ -433,32 +418,40 @@ def history_prompt_text(history_count: int) -> str:
     return "none" if history_count <= 0 else f"known_watch_history_count={history_count}; use history primarily to avoid re-recommending already watched titles"
 
 
-def build_retrieval_profile(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
+def build_retrieval_profile(preferences: str, history: tuple[tuple[int | None, str], ...], intent: dict[str, Any] | None = None) -> dict[str, Any]:
     history_df = history_rows(history)
+    normalized_intent = normalize_intent(intent, preferences)
     raw_preference_tokens = tokenize(preferences)
-    phrase_positive_tokens, phrase_negative_tokens = extract_phrase_hints(preferences)
     history_signals = derive_history_signals(history_df)
+    query_tokens = tokenize(normalized_intent["query_text"])
+    intent_positive_tokens = tokenize(" ".join(normalized_intent["must_have"] + normalized_intent["tone"]))
+    intent_negative_tokens = tokenize(" ".join(normalized_intent["avoid"]))
     return {
+        "intent": normalized_intent,
         "history_df": history_df,
         "history_count": len(history),
         "history_exclusion_text": history_prompt_text(len(history)),
         "history_titles": {name for _, name in history if name},
         "history_tmdb_ids": {tmdb_id for tmdb_id, _ in history if tmdb_id is not None},
         "raw_preference_tokens": raw_preference_tokens,
-        "phrase_positive_tokens": phrase_positive_tokens,
-        "phrase_negative_tokens": phrase_negative_tokens,
+        "query_tokens": query_tokens,
+        "intent_positive_tokens": intent_positive_tokens,
+        "intent_negative_tokens": intent_negative_tokens,
         **history_signals,
     }
 
 
 def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
-    preference_tokens = tokenize(preferences)
-    phrase_positive_tokens, phrase_negative_tokens = extract_phrase_hints(preferences)
+    intent = retrieval_profile["intent"]
+    preferred_themes = intent["must_have"][:6] + [tone for tone in intent["tone"][:3] if tone not in intent["must_have"][:6]]
+    if not preferred_themes:
+        fallback_tokens = sorted(token for token in tokenize(preferences) if len(token) > 2 and token not in {"science", "fiction"})[:6]
+        preferred_themes = fallback_tokens
     return {
         "target_genres": [],
-        "preferred_tones": [],
-        "preferred_themes": sorted((preference_tokens | phrase_positive_tokens) - phrase_negative_tokens)[:10],
-        "avoid": sorted(phrase_negative_tokens)[:8],
+        "preferred_tones": intent["tone"][:4],
+        "preferred_themes": preferred_themes,
+        "avoid": intent["avoid"][:6],
         "history_signals": {
             "liked_genres": sorted(retrieval_profile["liked_genres"])[:6],
             "liked_directors": sorted(retrieval_profile["liked_directors"])[:4],
@@ -468,11 +461,15 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
 
 
 def build_query_text(preferences: str, retrieval_profile: dict[str, Any]) -> str:
-    parts = [str(preferences or "").strip()]
-    if retrieval_profile["phrase_positive_tokens"]:
-        parts.append("themes: " + ", ".join(sorted(retrieval_profile["phrase_positive_tokens"])[:8]))
-    if retrieval_profile["phrase_negative_tokens"]:
-        parts.append("avoid: " + ", ".join(sorted(retrieval_profile["phrase_negative_tokens"])[:6]))
+    intent = retrieval_profile["intent"]
+    primary_query = ", ".join(intent["must_have"][:6] + intent["tone"][:4]).strip(", ")
+    parts = [primary_query or intent["query_text"]]
+    if intent["must_have"]:
+        parts.append("must have: " + ", ".join(intent["must_have"][:6]))
+    if intent["tone"]:
+        parts.append("tone: " + ", ".join(intent["tone"][:4]))
+    if intent["avoid"]:
+        parts.append("avoid: " + ", ".join(intent["avoid"][:6]))
     return " | ".join(part for part in parts if part)
 
 
@@ -497,11 +494,42 @@ def history_affinity_score(row: pd.Series, retrieval_profile: dict[str, Any]) ->
     return score
 
 
+def intent_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+    positive_tokens = (
+        retrieval_profile["raw_preference_tokens"]
+        | retrieval_profile["query_tokens"]
+        | retrieval_profile["intent_positive_tokens"]
+    )
+    negative_tokens = retrieval_profile["intent_negative_tokens"]
+    tokens = row["search_blob_tokens"]
+
+    positive_overlap = len(positive_tokens.intersection(tokens))
+    negative_overlap = len(negative_tokens.intersection(tokens))
+
+    score = 0.7 * positive_overlap
+    score += 0.35 * len(retrieval_profile["intent_positive_tokens"].intersection(row["keywords_set"]))
+    if retrieval_profile["intent"]["must_have"]:
+        score += 0.25 * sum(
+            1 for phrase in retrieval_profile["intent"]["must_have"] if normalize_text(phrase) in row["search_blob"]
+        )
+    score -= 2.4 * negative_overlap
+    if retrieval_profile["intent"]["avoid"]:
+        score -= 1.2 * sum(
+            1 for phrase in retrieval_profile["intent"]["avoid"] if normalize_text(phrase) in row["search_blob"]
+        )
+    if negative_overlap and positive_overlap <= 1:
+        score -= 1.5
+    return score
+
+
 def novelty_penalty(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     penalty = 4.0 if row["title_root"] and row["title_root"] in retrieval_profile["watched_roots"] else 0.0
-    negative_superhero = {"marvel", "avengers", "superhero", "dc", "hero"}
-    if retrieval_profile["phrase_negative_tokens"].intersection(negative_superhero).intersection(row["search_blob_tokens"]):
-        penalty += 3.0
+    if retrieval_profile["intent_negative_tokens"] and retrieval_profile["intent_negative_tokens"].intersection(row["search_blob_tokens"]):
+        penalty += 4.0
+    if retrieval_profile["intent"]["avoid"]:
+        penalty += 1.0 * sum(
+            1 for phrase in retrieval_profile["intent"]["avoid"] if normalize_text(phrase) in row["search_blob"]
+        )
     return penalty
 
 
@@ -515,12 +543,16 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     history_component = _normalize_component(history_affinity_score(row, retrieval_profile), 6.0)
     appeal_component = _normalize_component(appeal_score(row), 8.0)
     novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 7.0)
+    intent_component = _normalize_component(max(0.0, intent_alignment_score(row, retrieval_profile)), 8.0)
+    intent_penalty = _normalize_component(max(0.0, -intent_alignment_score(row, retrieval_profile)), 5.0)
     return (
-        0.45 * float(row.get("semantic_score", 0.0))
-        + 0.25 * float(row.get("fts_score", 0.0))
+        0.42 * float(row.get("semantic_score", 0.0))
+        + 0.23 * float(row.get("fts_score", 0.0))
+        + 0.15 * intent_component
         + 0.15 * history_component
         + 0.10 * appeal_component
         - 0.05 * novelty_component
+        - 0.08 * intent_penalty
     )
 
 
@@ -528,15 +560,17 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
     if int(row["tmdb_id"]) in retrieval_profile["history_tmdb_ids"] or row["title"] in retrieval_profile["history_titles"]:
         return -10_000.0
 
-    query_terms = retrieval_profile["raw_preference_tokens"] | retrieval_profile["phrase_positive_tokens"]
+    query_terms = retrieval_profile["raw_preference_tokens"] | retrieval_profile["query_tokens"] | retrieval_profile["intent_positive_tokens"]
     overlap = len(query_terms.intersection(row["search_blob_tokens"]))
-    negative_hits = len(retrieval_profile["phrase_negative_tokens"].intersection(row["search_blob_tokens"]))
+    negative_hits = len(retrieval_profile["intent_negative_tokens"].intersection(row["search_blob_tokens"]))
+    alignment_score = intent_alignment_score(row, retrieval_profile)
 
     return (
         float(overlap)
+        + 0.9 * alignment_score
         + 0.8 * history_affinity_score(row, retrieval_profile)
         + 0.4 * appeal_score(row)
-        - 1.5 * negative_hits
+        - 2.1 * negative_hits
         - novelty_penalty(row, retrieval_profile)
     )
 
@@ -596,8 +630,12 @@ def _candidate_frame(
     return candidates
 
 
-def local_fallback_candidates(preferences: str, history: tuple[tuple[int | None, str], ...]) -> tuple[pd.DataFrame, dict[str, Any]]:
-    retrieval_profile = build_retrieval_profile(preferences, history)
+def local_fallback_candidates(
+    preferences: str,
+    history: tuple[tuple[int | None, str], ...],
+    intent: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    retrieval_profile = build_retrieval_profile(preferences, history, intent=intent)
     candidates = MOVIES.copy()
     candidates["fts_score"] = 0.0
     candidates["semantic_score"] = 0.0
@@ -606,8 +644,13 @@ def local_fallback_candidates(preferences: str, history: tuple[tuple[int | None,
     return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile
 
 
-def build_candidate_pool(preferences: str, history: tuple[tuple[int | None, str], ...], mode: str = "hybrid") -> tuple[pd.DataFrame, dict[str, Any], str]:
-    retrieval_profile = build_retrieval_profile(preferences, history)
+def build_candidate_pool(
+    preferences: str,
+    history: tuple[tuple[int | None, str], ...],
+    mode: str = "hybrid",
+    intent: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any], str]:
+    retrieval_profile = build_retrieval_profile(preferences, history, intent=intent)
     query_text = build_query_text(preferences, retrieval_profile)
     exclude_ids = set(retrieval_profile["history_tmdb_ids"])
 
@@ -619,7 +662,7 @@ def build_candidate_pool(preferences: str, history: tuple[tuple[int | None, str]
 
     candidates = _candidate_frame(lexical_hits, semantic_hits, retrieval_profile, mode)
     if candidates.empty:
-        fallback, fallback_profile = local_fallback_candidates(preferences, history)
+        fallback, fallback_profile = local_fallback_candidates(preferences, history, intent=intent)
         return fallback, fallback_profile, "local_fallback"
 
     candidates["second_stage_score"] = candidates.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)
@@ -627,8 +670,13 @@ def build_candidate_pool(preferences: str, history: tuple[tuple[int | None, str]
     return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile, mode
 
 
-def build_shortlist(preferences: str, history: tuple[tuple[int | None, str], ...], mode: str = "hybrid") -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode)
+def build_shortlist(
+    preferences: str,
+    history: tuple[tuple[int | None, str], ...],
+    mode: str = "hybrid",
+    intent: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode, intent=intent)
     prompt_profile = build_prompt_profile(preferences, retrieval_profile)
 
     reranked = candidates.head(SECOND_STAGE_POOL_SIZE).copy()
