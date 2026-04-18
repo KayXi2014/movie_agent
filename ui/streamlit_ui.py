@@ -1,11 +1,17 @@
 import json
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
 import streamlit as st
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from llm import _extract_query_hints_cached
 from retrieval import build_shortlist, normalize_history
@@ -13,7 +19,7 @@ from retrieval import build_shortlist, normalize_history
 
 @st.cache_data
 def load_movies() -> pd.DataFrame:
-    data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tmdb_top1000_movies.csv")
+    data_path = PROJECT_ROOT / "data" / "tmdb_top1000_movies.csv"
     return pd.read_csv(data_path)
 
 
