@@ -18,7 +18,6 @@ from typing import Any
 import ollama
 
 from retrieval import (
-    MOVIES,
     MOVIES_BY_TMDB_ID,
     TOP_MOVIES,
     build_prompt_profile as _build_prompt_profile,
@@ -34,7 +33,6 @@ from retrieval import (
 
 
 LLM_STAGE_BUDGET_SECONDS = 18.0
-INTENT_LLM_TIMEOUT_SECONDS = 6.0
 SELECTION_LLM_TIMEOUT_SECONDS = 12.0
 MODEL = "gemma4:31b-cloud"
 logger = logging.getLogger(__name__)
@@ -125,69 +123,6 @@ def _resolve_selected_tmdb_id(selection_payload: dict[str, Any], shortlist: list
     raise ValueError(f"Model did not return a usable shortlist selection: {selection_payload}")
 
 
-def _default_intent(preferences: str) -> dict[str, Any]:
-    return {
-        "query_text": preferences,
-        "must_have": [],
-        "avoid": [],
-        "tone": [],
-    }
-
-
-def _build_intent_prompt(preferences: str, history: tuple[tuple[int | None, str], ...]) -> str:
-    watched_titles = [name for _, name in history if name][:5]
-    watched_text = ", ".join(f'"{name}"' for name in watched_titles) if watched_titles else "none"
-    return (
-        "Turn this movie request into a compact retrieval intent.\n\n"
-        f"User request: {preferences}\n"
-        f"Already watched: {watched_text}\n\n"
-        "Use history only to avoid repeats or overly similar picks. Do not assume watched movies were liked.\n"
-        "Return raw JSON only in this format:\n"
-        '{"query_text":"<short retrieval query>","must_have":["..."],"avoid":["..."],"tone":["..."]}\n'
-        "Rules: keep query_text short and literal; make query_text positive-only retrieval language; put exclusions only in avoid; keep each list to at most 5 short items; only include things clearly supported by the request."
-    )
-
-
-def _sanitize_intent(payload: dict[str, Any], preferences: str) -> dict[str, Any]:
-    def _clean_list(value: Any) -> list[str]:
-        if isinstance(value, list):
-            items = value
-        elif value:
-            items = [value]
-        else:
-            items = []
-        cleaned = []
-        for item in items:
-            text = " ".join(str(item or "").split()).strip()
-            if text and text.lower() not in {"movie", "movies", "something"}:
-                cleaned.append(text)
-        return cleaned[:5]
-
-    query_text = " ".join(str(payload.get("query_text") or "").split()).strip() or preferences
-    return {
-        "query_text": query_text,
-        "must_have": _clean_list(payload.get("must_have")),
-        "avoid": _clean_list(payload.get("avoid")),
-        "tone": _clean_list(payload.get("tone")),
-    }
-
-
-@lru_cache(maxsize=256)
-def _extract_intent_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
-    prompt = _build_intent_prompt(preferences, history)
-    try:
-        response = _get_client(INTENT_LLM_TIMEOUT_SECONDS).chat(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            format="json",
-        )
-        payload = _extract_json_object(response.message.content)
-        return _sanitize_intent(payload, preferences)
-    except Exception as exc:
-        logger.warning("Falling back to default intent extraction: preferences_len=%d error=%s", len(preferences), exc)
-        return _default_intent(preferences)
-
-
 def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
@@ -195,7 +130,6 @@ def _build_selection_prompt(
     history_exclusion_text: str,
 ) -> str:
     avoid_text = ", ".join(prompt_profile["avoid"][:4]) if prompt_profile["avoid"] else "none"
-    focus_text = ", ".join(prompt_profile["preferred_themes"][:4]) if prompt_profile["preferred_themes"] else "none"
     history_hint = _build_history_exposure_hint(prompt_profile, history_exclusion_text)
 
     def _short_hook(movie: dict[str, Any]) -> str:
@@ -217,50 +151,80 @@ def _build_selection_prompt(
         return trimmed
 
     def _fmt(movie: dict[str, Any]) -> str:
-        return f'{movie["tmdb_id"]}: "{movie["title"]}" [{movie["genres"]}] - {_short_hook(movie)}'
+        genres = ", ".join(part.strip() for part in str(movie["genres"]).split(",")[:2] if part.strip()) or "movie"
+        return f'{movie["tmdb_id"]} | {movie["title"]} | {genres} | {_short_hook(movie)}'
 
     shortlist_text = "\n".join(_fmt(movie) for movie in shortlist)
 
     return (
         "Recommend one movie from this shortlist.\n\n"
         f"User request: {preferences}\n"
-        f"Focus: {focus_text}\n"
         f"Avoid: {avoid_text}\n"
         f"Already watched: {history_hint}\n\n"
         "Candidates:\n"
         f"{shortlist_text}\n\n"
+        "Pick the best fit and write like a sharp, thoughtful friend.\n"
+        "Be concrete, direct, and persuasive.\n"
+        "Only use support that is visible in the candidate line. Do not invent soundtrack, score, acclaim, awards, or adaptation details beyond what is shown.\n"
         "Return raw JSON only.\n"
-        'Format: {"tmdb_id": <candidate id>, "title": "<exact shortlisted title>", "description": "<two short sentences, under 280 chars>"}\n'
-        "Description rules: sentence 1 gives a concrete hook from the premise; sentence 2 says why it matches this request. "
-        "Sound warm and direct, like a thoughtful friend. No generic hype, no critic voice, no trailer voice."
+        'Format: {"tmdb_id": <candidate id>, "title": "<exact shortlisted title>", "description": "<2 or 3 sentences, under 500 chars>"}\n'
+        "Description rules: sentence 1 gives a vivid premise hook; sentence 2 explains why it matches this request; sentence 3 is optional. "
+        "Address the user directly when natural. No generic hype, critic voice, or trailer voice."
     )
 
 
 def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any]) -> str:
     keywords = [part.strip() for part in str(movie.get("keywords") or "").split(",") if part.strip()]
-    lead_keywords = ", ".join(keywords[:3])
+    lead_keywords = ", ".join(keywords[:4])
     if lead_keywords:
-        hook = f'{movie["title"]} leans into {lead_keywords} rather than vague spectacle.'
+        hook = f'{movie["title"]} throws you into {lead_keywords}, with a premise that feels concrete right away.'
     else:
         overview = str(movie["overview"]).strip()
         if overview:
-            trimmed = overview[:140]
+            trimmed = overview[:180]
             last_space = trimmed.rfind(" ")
-            if len(overview) > 140 and last_space > 80:
+            if len(overview) > 180 and last_space > 100:
                 trimmed = trimmed[:last_space]
             hook = trimmed.rstrip(".") + "."
         else:
-            hook = f'{movie["title"]} has a concrete, story-first sci-fi setup.'
+            hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
 
-    if prompt_profile["preferred_themes"]:
-        reason = ", ".join(prompt_profile["preferred_themes"][:2])
-        fit_line = f"If you want {reason} right now, this gets there through a specific premise instead of generic blockbuster noise."
+    tones = set(prompt_profile.get("preferred_tones", []))
+    if {"bad", "fun", "laugh"}.intersection(tones):
+        fit_line = "If you want something loose, silly, and easy to laugh at with friends, this is the kind of pick that works better once everyone starts leaning into the chaos."
+    elif prompt_profile["preferred_themes"]:
+        reason = ", ".join(prompt_profile["preferred_themes"][:3])
+        fit_line = f"If you want {reason} right now, this is easier to buy into because the appeal comes from the idea and the pressure of the situation, not empty spectacle."
     elif movie["genres"]:
-        fit_line = f"If you want something in the {movie['genres']} lane, this is an easier sell because the premise is clear from the start."
+        fit_line = f"If you want something in the {movie['genres']} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
     else:
         fit_line = "If you want something engaging without overthinking it, this gives you a clearer hook than a generic effects-first pick."
 
     return f"{hook} {fit_line}"[:500]
+
+
+def _enrich_shortlist(shortlist_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for ref in shortlist_refs:
+        tmdb_id = int(ref["tmdb_id"])
+        if tmdb_id not in MOVIES_BY_TMDB_ID.index:
+            continue
+        row = MOVIES_BY_TMDB_ID.loc[tmdb_id]
+        if hasattr(row, "iloc") and not isinstance(row, dict) and getattr(row, "ndim", 1) > 1:
+            row = row.iloc[0]
+        enriched.append(
+            {
+                "tmdb_id": tmdb_id,
+                "title": str(row["title"]),
+                "genres": str(row["genres"]),
+                "overview": str(row["overview"])[:220],
+                "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
+                "score": ref.get("score", 0.0),
+                "semantic_score": ref.get("semantic_score", 0.0),
+                "fts_score": ref.get("fts_score", 0.0),
+            }
+        )
+    return enriched
 
 
 def _build_history_exposure_hint(prompt_profile: dict[str, Any], history_exclusion_text: str) -> str:
@@ -309,8 +273,8 @@ def _choose_with_llm(
 
 @lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
-    intent = _extract_intent_cached(preferences, history)
-    shortlist, prompt_profile, retrieval_profile = _build_shortlist(preferences, history, intent=intent)
+    shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
+    shortlist = _enrich_shortlist(shortlist_refs)
     if not shortlist:
         raise ValueError("No candidate movies available")
 
