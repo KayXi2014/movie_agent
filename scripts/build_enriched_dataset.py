@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from tmdb_client import enrich_movie_rows
+from scripts.tmdb_client import enrich_movie_rows
 
 
-ROOT = Path(__file__).resolve().parent
-SOURCE_PATH = ROOT / "tmdb_top1000_movies.csv"
-TARGET_PATH = ROOT / "tmdb_top1000_movies_enriched.csv"
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+SOURCE_PATH = DATA_DIR / "tmdb_top1000_movies.csv"
+TARGET_PATH = DATA_DIR / "tmdb_top1000_movies_enriched.csv"
 
 
 def build_enriched_dataset() -> None:

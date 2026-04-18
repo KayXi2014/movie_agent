@@ -20,15 +20,17 @@ SECOND_STAGE_POOL_SIZE = 36
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 ROOT = Path(__file__).resolve().parent
-DATA_PATH = ROOT / "tmdb_top1000_movies.csv"
-ENRICHED_DATA_PATH = ROOT / "tmdb_top1000_movies_enriched.csv"
+PROJECT_ROOT = ROOT
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_PATH = DATA_DIR / "tmdb_top1000_movies.csv"
+ENRICHED_DATA_PATH = DATA_DIR / "tmdb_top1000_movies_enriched.csv"
 ACTIVE_DATA_PATH = ENRICHED_DATA_PATH if ENRICHED_DATA_PATH.exists() else DATA_PATH
 
-RETRIEVAL_DB_PATH = ROOT / "movies.sqlite"
-RETRIEVAL_DB_META_PATH = ROOT / "movies.sqlite.meta.json"
-EMBEDDINGS_PATH = ROOT / "movie_embeddings.npy"
-EMBEDDING_IDS_PATH = ROOT / "movie_embedding_ids.json"
-EMBEDDING_META_PATH = ROOT / "movie_embedding_meta.json"
+RETRIEVAL_DB_PATH = DATA_DIR / "movies.sqlite"
+RETRIEVAL_DB_META_PATH = DATA_DIR / "movies.sqlite.meta.json"
+EMBEDDINGS_PATH = DATA_DIR / "movie_embeddings.npy"
+EMBEDDING_IDS_PATH = DATA_DIR / "movie_embedding_ids.json"
+EMBEDDING_META_PATH = DATA_DIR / "movie_embedding_meta.json"
 
 TEXT_COLUMNS = [
     "title",
@@ -146,7 +148,7 @@ def file_sha256(path: Path) -> str:
 
 def dataset_fingerprint(path: Path = ACTIVE_DATA_PATH) -> dict[str, Any]:
     try:
-        source_relpath = str(path.resolve().relative_to(ROOT.resolve()))
+        source_relpath = str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
     except ValueError:
         source_relpath = path.name
     return {

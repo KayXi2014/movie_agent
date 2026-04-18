@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 
-from build_enriched_dataset import build_enriched_dataset
 from retrieval import refresh_retrieval_artifacts
+from scripts.build_enriched_dataset import build_enriched_dataset
 
 
 def prepare_local_runtime() -> None:

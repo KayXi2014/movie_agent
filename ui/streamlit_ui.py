@@ -13,7 +13,7 @@ from retrieval import build_shortlist, normalize_history
 
 @st.cache_data
 def load_movies() -> pd.DataFrame:
-    data_path = os.path.join(os.path.dirname(__file__), "tmdb_top1000_movies.csv")
+    data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tmdb_top1000_movies.csv")
     return pd.read_csv(data_path)
 
 
@@ -130,7 +130,7 @@ with st.sidebar:
     st.header("API Settings")
     api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8000")
     request_timeout = st.number_input("Request timeout (seconds)", min_value=1, max_value=120, value=25)
-    show_local_debug = st.checkbox("Show local debug run", value=True)
+    show_local_debug = st.checkbox("Show retrieval debug", value=True)
 
 st.subheader("User Inputs")
 

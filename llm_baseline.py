@@ -13,6 +13,7 @@ import json
 import os
 import time
 import argparse
+from pathlib import Path
 
 import ollama
 import pandas as pd
@@ -23,7 +24,7 @@ import pandas as pd
 
 MODEL = "gemma4:31b-cloud"
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "tmdb_top1000_movies.csv")
+DATA_PATH = Path(__file__).resolve().parent / "data" / "tmdb_top1000_movies.csv"
 TOP_MOVIES = pd.read_csv(DATA_PATH).nlargest(5, "vote_count")
 
 
@@ -113,4 +114,3 @@ if __name__ == "__main__":
     elapsed = time.perf_counter() - start
 
     print(f"\nServed in {elapsed:.2f}s")
-

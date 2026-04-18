@@ -1,8 +1,8 @@
 runtime: python
-startCommand: uvicorn main:app --port 8080
-buildCommand: pip install -r requirements.txt
+startCommand: uvicorn main:app --host 0.0.0.0 --port 8080
+buildCommand: pip install -r requirements.txt && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 port: 8080
-memory: 512mb
+memory: 1gb
 envs:
   - name: OLLAMA_API_KEY
     # Set this secret in the Leapcell dashboard — never commit the actual key
