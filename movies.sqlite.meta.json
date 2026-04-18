@@ -1,0 +1,8 @@
+{
+  "artifact_type": "sqlite_fts",
+  "row_count": 1000,
+  "source_name": "tmdb_top1000_movies.csv",
+  "source_path": "tmdb_top1000_movies.csv",
+  "source_sha256": "feac8e8ac58b42be50756ce0568a740ff4db83a549a6cf3d08433d210d83064b",
+  "source_size": 816819
+}

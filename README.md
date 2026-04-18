@@ -1,6 +1,9 @@
 # Movie Recommender – Starter
 
-A minimal API that recommends a movie based on a user's stated preferences. It picks from the 40 most-voted movies in the TMDB dataset and uses an LLM to choose the best match and write a short pitch.
+A movie recommendation API that combines local retrieval with one final LLM selection step. The current version supports:
+- local lexical retrieval with SQLite + FTS5
+- local semantic retrieval with precomputed embeddings
+- a compact shortlist passed to one final LLM call for the recommendation pitch
 
 ---
 
@@ -11,21 +14,48 @@ You can run your API on your own laptop to start, for testing purposes.
 **1. Install dependencies**
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 **2. Set your API key**
-You will need to obtain an API key from [ollama.com/settings/keys](https://ollama.com/settings/keys). A free account is included with Ollama.
+You will need an API key from [ollama.com/settings/keys](https://ollama.com/settings/keys).
 
-You need to bring this API key into your terminal environment, by running the command:
+Export it into the same terminal where you will start the app:
 
 ```bash
 export OLLAMA_API_KEY=your_ollama_api_key_here
 ```
 
-**3. Start the server**
+**3. Prepare the local runtime**
+
+Run one setup command before launching the API:
+
+```bash
+python prepare_local_runtime.py
+```
+
+What it does:
+- if `TMDB_API_KEY` is set, it first builds `tmdb_top1000_movies_enriched.csv`
+- then it builds the retrieval artifacts used by the hybrid retriever
+
+If you want TMDB enrichment included in that setup step, export:
+
+```bash
+export TMDB_API_KEY=your_tmdb_api_key_here
+```
+
+The prep step creates:
+- `movies.sqlite`
+- `movies.sqlite.meta.json`
+- `movie_embeddings.npy`
+- `movie_embedding_ids.json`
+- `movie_embedding_meta.json`
+
+These files are used by the hybrid retriever. If they are missing or stale, the recommender falls back to the lexical Python retriever.
+
+**4. Start the server**
 
 ```bash
 uvicorn main:app --reload
@@ -41,7 +71,7 @@ INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 Note the port -- 8000 by default, althought it may be something else if 8000 is occupied.
 The server will automatically reload to reflect your changes if you edit the files in that directory.
 
-**4. Send a test request**
+**5. Send a test request**
 
 You can now make requests to your agent by `curl`-ing it, for example:
 
@@ -57,7 +87,7 @@ curl -X POST http://localhost:8000/recommend \
 
 Note that the port (8000 here) must be the same one that your app is listening on.
 
-**5. Optional: Run the Streamlit UI**
+**6. Optional: Run the Streamlit UI**
 
 This repo includes a separate Streamlit frontend in `streamlit_ui.py` so you can use the recommender from a browser form instead of scripts.
 
@@ -129,17 +159,15 @@ The baseline recommender sends one large prompt to the LLM using only the 40 mos
 The new `llm.py` is more systematic and retrieval-heavy:
 
 - It uses the full TMDB top-1000 dataset instead of only the top 40, so coverage is much broader.
-- It performs heuristic heavy-lifting first (PhraseRules + BM25-like token scoring + metadata signals), so the shortlist is already high quality before the LLM is called.
-- It resolves watch history by `tmdb_id` first, with normalized title matching and limited TMDB fallback for robustness.
-- It treats watch history mainly as an exclusion and novelty signal, so already-seen or overly similar picks are pushed down unless they strongly match explicit current preferences.
-- It can enrich top candidates with TMDB metadata (`TMDB_ENRICH_TOP_N`) before final ranking.
+- It builds local retrieval artifacts offline: SQLite + FTS5 for lexical search and precomputed embeddings for semantic search.
+- It retrieves candidates locally first, then uses a lightweight hybrid reranker before the LLM sees a shortlist.
+- It resolves watch history by `tmdb_id` first and uses it mainly for exclusion, history affinity, and novelty control.
 - It sends only a compact shortlist to the LLM to reduce token usage and latency.
-- It uses one primary LLM decision call that returns `selection` only (winning `tmdb_id` and persuasive description) to reduce output-token latency.
-- It enforces an explicit decision order in the prompt: identify mood, filter by avoid constraints, then pick a winner.
-- It includes a short retry prompt if the primary call fails, and falls back to the top heuristic candidate if LLM selection still fails.
+- It uses one primary LLM decision call that returns the winning `tmdb_id` and persuasive description.
+- It falls back to lexical retrieval if retrieval artifacts are missing or stale, and falls back to the top shortlist item if the LLM call fails.
 - It adds caching and timing logs to improve repeat-request speed and debugging visibility.
 
-In short, `llm_baseline.py` is LLM-first on a small pool, while `llm.py` is retrieval-first on a large pool with one primary structured LLM decision step.
+In short, `llm_baseline.py` is LLM-first on a small pool, while `llm.py` is retrieval-first on a large pool with local hybrid retrieval and one final structured LLM decision step.
 
 ## Evaluation Setup
 

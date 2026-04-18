@@ -57,6 +57,17 @@ def improved_pick(preferences: str, history_payload: list[dict[str, Any]]) -> di
     return _enrich_result(llm.get_recommendation(preferences, history_payload))
 
 
+def retrieval_mode_pick(preferences: str, history: tuple[tuple[int | None, str], ...], mode: str) -> dict[str, Any]:
+    shortlist, _, retrieval_profile = llm._build_shortlist(preferences, history, mode=mode)
+    if not shortlist:
+        raise ValueError(f"no shortlist candidates for mode={mode}")
+    result = dict(shortlist[0])
+    result["description"] = ""
+    result["used_llm"] = False
+    result["retrieval_mode"] = retrieval_profile.get("retrieval_mode", mode)
+    return _enrich_result(result)
+
+
 def _validate_payload(payload: Any) -> tuple[bool, bool, str]:
     if not isinstance(payload, dict):
         return False, True, "non-dict payload"
@@ -387,6 +398,16 @@ def summarize(df: pd.DataFrame, prefix: str) -> dict[str, Any]:
     }
 
 
+def summarize_retrieval(df: pd.DataFrame) -> dict[str, Any]:
+    return {
+        "avg_score": round(float(df["total_score"].mean()), 2),
+        "avg_latency_seconds": round(float(df["elapsed_seconds"].mean()), 3),
+        "constraint_pass_rate": round(float(df["constraint_pass"].mean()), 3),
+        "avg_vote_average": round(float(df["vote_average"].mean()), 2),
+        "unique_titles": int(df["title"].nunique()),
+    }
+
+
 def _failed_eval() -> dict[str, Any]:
     return {
         "tmdb_id": -1,
@@ -427,6 +448,7 @@ def main() -> None:
 
     cases = json.loads(CASES_PATH.read_text())
     rows = []
+    retrieval_rows = []
 
     for case in cases:
         request_payload = {
@@ -450,6 +472,21 @@ def main() -> None:
             request_payload["history"],
             normalized_history,
         )
+
+        retrieval_results = {}
+        for mode in ("lexical", "semantic", "hybrid"):
+            start = time.perf_counter()
+            try:
+                payload = retrieval_mode_pick(request_payload["preferences"], normalized_history, mode)
+                error = ""
+            except Exception as exc:
+                payload = None
+                error = str(exc)
+            retrieval_results[mode] = {
+                "payload": payload,
+                "elapsed_seconds": round(time.perf_counter() - start, 3),
+                "error": error,
+            }
 
         baseline_eval = (
             evaluate_result(
@@ -549,15 +586,47 @@ def main() -> None:
             }
         )
 
+        for mode, result in retrieval_results.items():
+            evaluation = (
+                evaluate_result(
+                    result["payload"],
+                    case,
+                    normalized_history,
+                    result["elapsed_seconds"],
+                )
+                if result["payload"] is not None
+                else _failed_eval()
+            )
+            retrieval_rows.append(
+                {
+                    "id": case["id"],
+                    "category": case["category"],
+                    "mode": mode,
+                    "title": evaluation["title"],
+                    "total_score": evaluation["total_score"],
+                    "constraint_pass": evaluation["constraint_pass"],
+                    "vote_average": evaluation["vote_average"],
+                    "elapsed_seconds": result["elapsed_seconds"],
+                    "error": result["error"],
+                }
+            )
+
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
     print()
 
     baseline_summary = summarize(df, "baseline")
     improved_summary = summarize(df, "improved")
+    retrieval_df = pd.DataFrame(retrieval_rows)
+    lexical_summary = summarize_retrieval(retrieval_df[retrieval_df["mode"] == "lexical"])
+    semantic_summary = summarize_retrieval(retrieval_df[retrieval_df["mode"] == "semantic"])
+    hybrid_summary = summarize_retrieval(retrieval_df[retrieval_df["mode"] == "hybrid"])
 
     print("Baseline summary:", baseline_summary)
     print("Improved summary:", improved_summary)
+    print("Lexical retrieval summary:", lexical_summary)
+    print("Semantic retrieval summary:", semantic_summary)
+    print("Hybrid retrieval summary:", hybrid_summary)
     print(
         "Error rates:",
         {
@@ -584,6 +653,9 @@ def main() -> None:
     results_csv = ROOT / "benchmark_results.csv"
     df.to_csv(results_csv, index=False)
     print(f"\nDetailed results saved to: {results_csv}")
+    retrieval_results_csv = ROOT / "benchmark_retrieval_results.csv"
+    retrieval_df.to_csv(retrieval_results_csv, index=False)
+    print(f"Retrieval-only results saved to: {retrieval_results_csv}")
 
     summary_data = {
         "metric": [
@@ -648,6 +720,36 @@ def main() -> None:
     summary_csv = ROOT / "benchmark_summary.csv"
     summary_df.to_csv(summary_csv, index=False)
     print(f"Summary statistics saved to: {summary_csv}")
+
+    retrieval_summary_df = pd.DataFrame(
+        {
+            "metric": ["avg_score", "avg_latency_seconds", "constraint_pass_rate", "avg_vote_average", "unique_titles"],
+            "lexical": [
+                lexical_summary["avg_score"],
+                lexical_summary["avg_latency_seconds"],
+                lexical_summary["constraint_pass_rate"],
+                lexical_summary["avg_vote_average"],
+                lexical_summary["unique_titles"],
+            ],
+            "semantic": [
+                semantic_summary["avg_score"],
+                semantic_summary["avg_latency_seconds"],
+                semantic_summary["constraint_pass_rate"],
+                semantic_summary["avg_vote_average"],
+                semantic_summary["unique_titles"],
+            ],
+            "hybrid": [
+                hybrid_summary["avg_score"],
+                hybrid_summary["avg_latency_seconds"],
+                hybrid_summary["constraint_pass_rate"],
+                hybrid_summary["avg_vote_average"],
+                hybrid_summary["unique_titles"],
+            ],
+        }
+    )
+    retrieval_summary_csv = ROOT / "benchmark_retrieval_summary.csv"
+    retrieval_summary_df.to_csv(retrieval_summary_csv, index=False)
+    print(f"Retrieval summary statistics saved to: {retrieval_summary_csv}")
 
 
 if __name__ == "__main__":
