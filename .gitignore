@@ -1,5 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.pyc.*
+.pycache_tmp/
 .venv/
 /.agent-shell/
