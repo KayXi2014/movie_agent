@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -32,14 +33,26 @@ from retrieval import (
 )
 
 
-LLM_STAGE_BUDGET_SECONDS = 18.0
-SELECTION_LLM_TIMEOUT_SECONDS = 12.0
+TOTAL_REQUEST_BUDGET_SECONDS = 20.0
+FALLBACK_BUFFER_SECONDS = 1.0
+LLM_TIMEOUT_SAFETY_MARGIN_SECONDS = 0.25
 MODEL = "gemma4:31b-cloud"
 logger = logging.getLogger(__name__)
 
+try:
+    from semantic_retrieval import warm_semantic_runtime as _warm_semantic_runtime
+except Exception:
+    _warm_semantic_runtime = None
+
+if _warm_semantic_runtime is not None:
+    try:
+        _warm_semantic_runtime()
+    except Exception as exc:
+        logger.warning("Semantic runtime prewarm failed: %r", exc)
+
 
 @lru_cache(maxsize=8)
-def _get_client(timeout_seconds: float = LLM_STAGE_BUDGET_SECONDS) -> ollama.Client:
+def _get_client(timeout_seconds: float) -> ollama.Client:
     return ollama.Client(
         host="https://ollama.com",
         headers={"Authorization": f"Bearer {os.environ['OLLAMA_API_KEY']}"},
@@ -126,10 +139,8 @@ def _resolve_selected_tmdb_id(selection_payload: dict[str, Any], shortlist: list
 def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
-    prompt_profile: dict[str, Any],
     history_exclusion_text: str,
 ) -> str:
-    avoid_text = ", ".join(prompt_profile["avoid"][:4]) if prompt_profile["avoid"] else "none"
     history_hint = _build_history_exposure_hint(history_exclusion_text)
 
     def _trim_text(value: Any, limit: int) -> str:
@@ -147,51 +158,57 @@ def _build_selection_prompt(
         return ", ".join(items[:limit])
 
     def _fmt(movie: dict[str, Any]) -> str:
-        parts = [f'{movie["tmdb_id"]} | {movie["title"]} ({movie["year"]})']
+        title = movie["title"]
+        if movie.get("year"):
+            title = f'{title} ({movie["year"]})'
+        parts = [f'{movie["tmdb_id"]} | {title}']
 
         genres = _csv_head(movie["genres"], 3)
         if genres:
             parts.append(f"genres: {genres}")
 
-        director = _trim_text(movie.get("director"), 40)
-        if director:
-            parts.append(f"director: {director}")
-
-        cast = _csv_head(movie.get("top_cast"), 2)
-        if cast:
-            parts.append(f"cast: {cast}")
-
-        keywords = _csv_head(movie.get("keywords"), 4)
+        keywords = _csv_head(movie.get("keywords"), 3)
         if keywords:
             parts.append(f"keywords: {keywords}")
 
-        tagline = _trim_text(movie.get("tagline"), 70)
-        if tagline:
-            parts.append(f"tagline: {tagline}")
+        country = _csv_head(movie.get("production_countries"), 2)
+        if country:
+            parts.append(f"country: {country}")
 
-        premise = _trim_text(movie.get("overview"), 120) or "clear premise"
+        premise = _trim_text(movie.get("overview"), 72) or "clear premise"
         parts.append(f"premise: {premise}")
 
         return " | ".join(parts)
 
     shortlist_text = "\n".join(_fmt(movie) for movie in shortlist)
-
-    return (
-        "Recommend one movie from this shortlist.\n\n"
-        f"User request: {preferences}\n"
-        f"Avoid: {avoid_text}\n"
-        f"Already watched: {history_hint}\n\n"
-        "Candidates:\n"
-        f"{shortlist_text}\n\n"
-        "Pick the best fit and write like a sharp, thoughtful friend.\n"
-        "Be concrete, direct, and persuasive.\n"
-        "Use the candidate details carefully: genre, premise, keywords, year, director, cast, and tagline can all matter.\n"
-        "Only make claims that are supported by the candidate line and the user's request. Do not invent extra facts or qualities that are not grounded in the provided information.\n"
-        "Return raw JSON only.\n"
-        'Format: {"tmdb_id": <candidate id>, "title": "<exact shortlisted title>", "description": "<2 or 3 sentences, under 500 chars>"}\n'
-        "Description rules: sentence 1 gives a vivid premise hook; sentence 2 explains why it matches this request; sentence 3 is optional. "
-        "Address the user directly when natural. No generic hype, critic voice, or trailer voice."
+    sections = [
+        "Choose the single best fit from this retrieved shortlist.",
+        "Your job is to select first, then sell the choice.",
+        f"Request: {preferences}",
+    ]
+    if history_hint != "none":
+        sections.append(f"History: {history_hint}")
+    sections.extend(
+        [
+            "",
+            "Rules:",
+            "- Do not retrieve or invent a different movie.",
+            "- Use the user's request as the source of constraints and preferences.",
+            "- Judge each movie only by the dataset-backed candidate details shown below.",
+            "- If a year is shown, use it only when the request cares about recency or era.",
+            "- Do not introduce qualities that are not supported by the request or the candidate details.",
+            'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
+            "",
+            "Candidates:",
+            shortlist_text,
+            "",
+            "Description: be personal and persuasive, but specific to this user.",
+            "Sentence 1 gives a vivid hook.",
+            "Sentence 2 and 3 explain why this fits the user's request right now.",
+            "Address the user directly with personal persuasive tone. No generic hype or critic voice.",
+        ]
     )
+    return "\n".join(sections)
 
 
 def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any]) -> str:
@@ -210,12 +227,13 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
         else:
             hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
 
-    themes = set(prompt_profile.get("preferred_themes", []))
-    if {"bad", "fun", "funny", "friends", "laugh"}.intersection(themes):
-        fit_line = "If you want something loose, silly, and easy to laugh at with friends, this is the kind of pick that works better once everyone starts leaning into the chaos."
-    elif prompt_profile["preferred_themes"]:
-        reason = ", ".join(prompt_profile["preferred_themes"][:3])
-        fit_line = f"If you want {reason} right now, this is easier to buy into because the appeal comes from the idea and the pressure of the situation, not empty spectacle."
+    tones = prompt_profile.get("tone", [])
+    if tones:
+        reason = ", ".join(tones[:2])
+        fit_line = f"If you want something {reason} right now, this lands better because the appeal comes from the story pressure and mood, not empty spectacle."
+    elif prompt_profile["target_genres"]:
+        target = ", ".join(prompt_profile["target_genres"][:2])
+        fit_line = f"If you want something in the {target} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
     elif movie["genres"]:
         fit_line = f"If you want something in the {movie['genres']} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
     else:
@@ -224,7 +242,7 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
     return f"{hook} {fit_line}"[:500]
 
 
-def _enrich_shortlist(shortlist_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool = False) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     for ref in shortlist_refs:
         tmdb_id = int(ref["tmdb_id"])
@@ -233,39 +251,33 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]]) -> list[dict[str, An
         row = MOVIES_BY_TMDB_ID.loc[tmdb_id]
         if hasattr(row, "iloc") and not isinstance(row, dict) and getattr(row, "ndim", 1) > 1:
             row = row.iloc[0]
-        enriched.append(
-            {
-                "tmdb_id": tmdb_id,
-                "title": str(row["title"]),
-                "year": int(row["year"]) if str(row.get("year", "")).strip() else 0,
-                "genres": str(row["genres"]),
-                "overview": str(row["overview"])[:220],
-                "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
-                "director": str(row.get("director", "")),
-                "top_cast": str(row.get("top_cast", "")),
-                "tagline": str(row.get("tagline", ""))[:120],
-                "score": ref.get("score", 0.0),
-                "semantic_score": ref.get("semantic_score", 0.0),
-                "fts_score": ref.get("fts_score", 0.0),
-            }
-        )
+        movie = {
+            "tmdb_id": tmdb_id,
+            "title": str(row["title"]),
+            "genres": str(row["genres"]),
+            "overview": str(row["overview"])[:220],
+            "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
+            "production_countries": str(row.get("production_countries", "")),
+        }
+        if include_year and str(row.get("year", "")).strip():
+            movie["year"] = int(row["year"])
+        enriched.append(movie)
     return enriched
 
 
 def _build_history_exposure_hint(history_exclusion_text: str) -> str:
     if history_exclusion_text == "none":
         return "none"
-    return "avoid repeating the same movie or something too obviously similar to the watch history"
+    return "avoid repeats and near-duplicates from watch history"
 
 
 def _choose_with_llm(
     preferences: str,
     shortlist: list[dict[str, Any]],
-    prompt_profile: dict[str, Any],
     history_exclusion_text: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    prompt = _build_selection_prompt(preferences, shortlist, prompt_profile, history_exclusion_text)
+    prompt = _build_selection_prompt(preferences, shortlist, history_exclusion_text)
     response = _get_client(timeout_seconds).chat(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -283,20 +295,29 @@ def _choose_with_llm(
     }
 
 
+def _remaining_llm_timeout_seconds(started_at: float) -> float:
+    elapsed = time.perf_counter() - started_at
+    remaining = TOTAL_REQUEST_BUDGET_SECONDS - elapsed - FALLBACK_BUFFER_SECONDS - LLM_TIMEOUT_SAFETY_MARGIN_SECONDS
+    return max(0.0, remaining)
+
+
 @lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
+    started_at = time.perf_counter()
     shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
-    shortlist = _enrich_shortlist(shortlist_refs)
+    shortlist = _enrich_shortlist(shortlist_refs, include_year=bool(prompt_profile.get("year_relevant")))
     if not shortlist:
         raise ValueError("No candidate movies available")
 
     try:
+        llm_timeout_seconds = _remaining_llm_timeout_seconds(started_at)
+        if llm_timeout_seconds <= 0.5:
+            raise TimeoutError("Not enough request budget left for LLM selection")
         result = _choose_with_llm(
             preferences,
             shortlist,
-            prompt_profile,
             retrieval_profile["history_exclusion_text"],
-            timeout_seconds=SELECTION_LLM_TIMEOUT_SECONDS,
+            timeout_seconds=llm_timeout_seconds,
         )
         result["used_llm"] = True
         return result

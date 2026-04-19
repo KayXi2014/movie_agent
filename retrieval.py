@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-SHORTLIST_SIZE = 20
+SHORTLIST_SIZE = 12
 FTS_LIMIT = 40
 SEMANTIC_LIMIT = 40
 MERGED_POOL_SIZE = 60
@@ -43,6 +42,21 @@ TEXT_COLUMNS = [
     "top_cast",
     "original_language",
     "production_countries",
+    "collection_name",
+    "spoken_languages",
+    "alternative_titles",
+    "us_rating",
+]
+OPTIONAL_TEXT_COLUMNS = [
+    "collection_name",
+    "spoken_languages",
+    "alternative_titles",
+    "us_rating",
+]
+OPTIONAL_DATA_COLUMNS = [
+    "similar_tmdb_ids",
+    "recommended_tmdb_ids",
+    *OPTIONAL_TEXT_COLUMNS,
 ]
 TOKEN_RE = re.compile(r"[a-z0-9']+")
 NEGATION_RE = re.compile(r"\b(?:no|not|without|avoid)\s+([a-z0-9][a-z0-9\-\s]{0,32}?)(?=,|\.|;|\bbut\b|\bexcept\b|\binstead\b|$)", re.IGNORECASE)
@@ -55,13 +69,8 @@ STOP_WORDS = {
     "at",
     "be",
     "but",
-    "could",
-    "completely",
     "for",
-    "find",
     "from",
-    "great",
-    "have",
     "i",
     "if",
     "in",
@@ -71,37 +80,27 @@ STOP_WORDS = {
     "ive",
     "i've",
     "like",
-    "love",
     "me",
     "movie",
     "movies",
-    "must",
     "no",
     "of",
-    "off",
     "on",
     "or",
-    "sound",
     "something",
-    "stories",
-    "story",
     "that",
     "that's",
     "thats",
     "the",
     "to",
-    "been",
-    "different",
-    "give",
-    "lately",
     "want",
     "watch",
-    "would",
     "with",
 }
 GENRE_ALIASES = {
     "action": "action",
     "adventure": "adventure",
+    "anime": "animation",
     "animation": "animation",
     "animated": "animation",
     "comedy": "comedy",
@@ -120,21 +119,41 @@ GENRE_ALIASES = {
     "war": "war",
     "western": "western",
 }
-SUBJECTIVE_QUERY_TOKENS = {
-    "awesome",
-    "bad",
-    "best",
-    "cool",
-    "enjoyable",
-    "entertaining",
-    "fun",
-    "funny",
-    "good",
-    "great",
-    "interesting",
-    "nice",
-}
-
+TONE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bgrounded\b", re.IGNORECASE), "grounded"),
+    (re.compile(r"\bserious\b", re.IGNORECASE), "serious"),
+    (re.compile(r"\bdark\b", re.IGNORECASE), "dark"),
+    (re.compile(r"\bgritty\b", re.IGNORECASE), "gritty"),
+    (re.compile(r"\btense\b", re.IGNORECASE), "tense"),
+    (re.compile(r"\bintense\b", re.IGNORECASE), "intense"),
+    (re.compile(r"\bwarm\b", re.IGNORECASE), "warm"),
+    (re.compile(r"\bintimate\b", re.IGNORECASE), "intimate"),
+    (re.compile(r"\bthoughtful\b", re.IGNORECASE), "thoughtful"),
+    (re.compile(r"\bcerebral\b", re.IGNORECASE), "cerebral"),
+    (re.compile(r"\bhaunting\b", re.IGNORECASE), "haunting"),
+    (re.compile(r"\bbleak\b", re.IGNORECASE), "bleak"),
+    (re.compile(r"\bmoody\b", re.IGNORECASE), "moody"),
+    (re.compile(r"\blighthearted\b|\blight-hearted\b", re.IGNORECASE), "lighthearted"),
+    (re.compile(r"\buplifting\b", re.IGNORECASE), "uplifting"),
+    (re.compile(r"\bromantic\b", re.IGNORECASE), "romantic"),
+    (re.compile(r"\bfunny\b", re.IGNORECASE), "funny"),
+    (re.compile(r"\bcampy\b", re.IGNORECASE), "campy"),
+)
+YEAR_SIGNAL_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b(?:19|20)\d0s\b|\b(?:80s|90s|2000s|2010s|2020s)\b", re.IGNORECASE)
+YEAR_SIGNAL_PHRASES = (
+    "recent",
+    "newer",
+    "latest",
+    "modern",
+    "older",
+    "classic",
+    "relatively new",
+    "new movie",
+    "older movie",
+    "old movie",
+    "this decade",
+    "last decade",
+)
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -178,16 +197,47 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def ensure_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
+    movies = df.copy()
+    for column in OPTIONAL_DATA_COLUMNS:
+        if column not in movies.columns:
+            movies[column] = ""
+    return movies
+
+
 def normalize_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     text = text.replace("sci-fi", "science fiction")
     text = text.replace("sci fi", "science fiction")
-    text = text.replace("superpowers", "superpower")
     return text
 
 
 def tokenize(value: Any) -> set[str]:
     return {token for token in TOKEN_RE.findall(normalize_text(value)) if token not in STOP_WORDS}
+
+
+def normalize_match_token(token: str) -> str:
+    text = normalize_text(token)
+    if len(text) <= 3:
+        return text
+    if text.endswith("ies") and len(text) > 4:
+        return text[:-3] + "y"
+    if text.endswith(("ches", "shes", "xes", "zes", "sses", "oes")) and len(text) > 4:
+        return text[:-2]
+    if text.endswith("s") and not text.endswith(("ss", "us", "is")) and len(text) > 3:
+        return text[:-1]
+    return text
+
+
+def match_tokens(value: Any) -> set[str]:
+    result: set[str] = set()
+    for token in TOKEN_RE.findall(normalize_text(value)):
+        if token in STOP_WORDS:
+            continue
+        normalized = normalize_match_token(token)
+        if normalized and normalized not in STOP_WORDS:
+            result.add(normalized)
+    return result
 
 
 def split_csvish(value: Any) -> set[str]:
@@ -213,10 +263,47 @@ def parse_json_int_list(value: Any) -> set[int]:
     return result
 
 
+def parse_json_string_list(value: Any) -> set[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return split_csvish(raw)
+    if not isinstance(parsed, list):
+        return set()
+    result: set[str] = set()
+    for item in parsed:
+        text = str(item or "").strip()
+        if text:
+            result.add(text)
+    return result
+
+
+def _build_title_variants(row: pd.Series) -> set[str]:
+    variants = {
+        normalize_text(row.get("title")),
+        normalize_text(row.get("original_title")),
+    }
+    variants.update(normalize_text(item) for item in row.get("alternative_titles_set", set()))
+    return {variant for variant in variants if variant}
+
+
+def _normalized_title_mentioned(text: str, title_variants: set[str]) -> bool:
+    for variant in title_variants:
+        if len(variant) < 5:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", text):
+            return True
+    return False
+
+
 def extract_negation_context(preferences: str) -> dict[str, Any]:
     normalized = normalize_text(preferences)
     negative_phrases: list[str] = []
     negative_tokens: set[str] = set()
+    negative_match_tokens: set[str] = set()
     hard_block_genres: set[str] = set()
 
     for match in NEGATION_RE.finditer(normalized):
@@ -226,25 +313,27 @@ def extract_negation_context(preferences: str) -> dict[str, Any]:
         negative_phrases.append(phrase)
         tokens = tokenize(phrase)
         negative_tokens.update(tokens)
+        negative_match_tokens.update(match_tokens(phrase))
         phrase_variants = {phrase, phrase.replace("-", " ")}
         for variant in phrase_variants:
             if variant in GENRE_ALIASES:
                 hard_block_genres.add(GENRE_ALIASES[variant])
+        for alias, canonical in GENRE_ALIASES.items():
+            for variant in phrase_variants:
+                if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", variant):
+                    hard_block_genres.add(canonical)
 
     raw_positive_tokens = tokenize(preferences) - negative_tokens
-    subjective_tokens = raw_positive_tokens.intersection(SUBJECTIVE_QUERY_TOKENS)
-    positive_query_tokens = raw_positive_tokens - subjective_tokens
-    if not positive_query_tokens:
-        positive_query_tokens = set(raw_positive_tokens)
+    positive_query_tokens = set(raw_positive_tokens)
     lexical_query_text = " ".join(sorted(positive_query_tokens))
     return {
         "negative_phrases": negative_phrases[:6],
         "negative_tokens": negative_tokens,
+        "negative_match_tokens": negative_match_tokens,
         "hard_block_genres": hard_block_genres,
         "lexical_query_text": lexical_query_text,
         "semantic_query_text": lexical_query_text or str(preferences or "").strip(),
         "positive_query_tokens": positive_query_tokens,
-        "subjective_tokens": subjective_tokens,
         "raw_positive_tokens": raw_positive_tokens,
     }
 
@@ -270,36 +359,21 @@ def title_root(title: Any) -> str:
     return text
 
 
-def build_movie_embedding_text(row: dict[str, Any]) -> str:
-    parts = [
-        f"Title: {row.get('title', '')}",
-        f"Original Title: {row.get('original_title', '')}",
-        f"Genres: {row.get('genres', '')}",
-        f"Keywords: {row.get('keywords', '')}",
-        f"Overview: {row.get('overview', '')}",
-        f"Tagline: {row.get('tagline', '')}",
-        f"Director: {row.get('director', '')}",
-        f"Top Cast: {row.get('top_cast', '')}",
-        f"Original Language: {row.get('original_language', '')}",
-        f"Production Countries: {row.get('production_countries', '')}",
-    ]
-    return "\n".join(part.strip() for part in parts if part.strip())
-
-
 def prepare_movies(df: pd.DataFrame) -> pd.DataFrame:
-    movies = df.copy()
+    movies = ensure_dataset_columns(df)
     movies["normalized_title"] = movies["title"].map(normalize_text)
     movies["title_root"] = movies["title"].map(title_root)
     movies["genres_set"] = movies["genres"].map(split_csvish)
     movies["keywords_set"] = movies["keywords"].map(split_csvish)
     movies["cast_set"] = movies["top_cast"].map(split_csvish)
     movies["director_set"] = movies["director"].map(split_csvish)
-    if "similar_tmdb_ids" in movies.columns:
-        movies["similar_ids_set"] = movies["similar_tmdb_ids"].map(parse_json_int_list)
-    else:
-        movies["similar_ids_set"] = [set() for _ in range(len(movies))]
+    movies["similar_ids_set"] = movies["similar_tmdb_ids"].map(parse_json_int_list)
+    movies["recommended_ids_set"] = movies["recommended_tmdb_ids"].map(parse_json_int_list)
+    movies["alternative_titles_set"] = movies["alternative_titles"].map(parse_json_string_list)
+    movies["title_variants"] = movies.apply(_build_title_variants, axis=1)
     movies["search_blob"] = movies[TEXT_COLUMNS].agg(" ".join, axis=1).map(normalize_text)
     movies["search_blob_tokens"] = movies["search_blob"].map(tokenize)
+    movies["search_blob_match_tokens"] = movies["search_blob"].map(match_tokens)
     return movies
 
 
@@ -307,6 +381,13 @@ TOP_MOVIES = pd.read_csv(ACTIVE_DATA_PATH).fillna("")
 MOVIES = prepare_movies(TOP_MOVIES)
 MOVIES_BY_EXACT_TITLE = MOVIES.groupby("title", sort=False)
 MOVIES_BY_TMDB_ID = MOVIES.set_index("tmdb_id", drop=False)
+MOVIES_BY_TITLE_VARIANT: dict[str, tuple[int, ...]] = {}
+for row in MOVIES.itertuples():
+    tmdb_id = int(row.tmdb_id)
+    for variant in row.title_variants:
+        existing = MOVIES_BY_TITLE_VARIANT.get(variant, ())
+        if tmdb_id not in existing:
+            MOVIES_BY_TITLE_VARIANT[variant] = (*existing, tmdb_id)
 
 
 def preference_seed_rows(preferences: str, history_df: pd.DataFrame) -> pd.DataFrame:
@@ -316,17 +397,12 @@ def preference_seed_rows(preferences: str, history_df: pd.DataFrame) -> pd.DataF
 
     matched_tmdb_ids: set[int] = set()
     for row in MOVIES.itertuples():
-        normalized_title = row.normalized_title
-        if len(normalized_title) < 5:
-            continue
-        title_pattern = re.compile(rf"(?<![a-z0-9]){re.escape(normalized_title)}(?![a-z0-9])")
-        if title_pattern.search(normalized_preferences):
+        if _normalized_title_mentioned(normalized_preferences, row.title_variants):
             matched_tmdb_ids.add(int(row.tmdb_id))
 
     if not history_df.empty:
         for row in history_df.itertuples():
-            normalized_title = row.normalized_title
-            if normalized_title and re.search(rf"(?<![a-z0-9]){re.escape(normalized_title)}(?![a-z0-9])", normalized_preferences):
+            if _normalized_title_mentioned(normalized_preferences, row.title_variants):
                 matched_tmdb_ids.add(int(row.tmdb_id))
 
     if not matched_tmdb_ids:
@@ -339,6 +415,7 @@ def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
     seed_keywords: set[str] = set()
     seed_title_tokens: set[str] = set()
     seed_similar_ids: set[int] = set()
+    seed_recommended_ids: set[int] = set()
     seed_tmdb_ids: set[int] = set()
     seed_titles: list[str] = []
 
@@ -347,6 +424,7 @@ def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
         seed_keywords.update(set(sorted(row.keywords_set)[:10]))
         seed_title_tokens.update(tokenize(row.title))
         seed_similar_ids.update(row.similar_ids_set)
+        seed_recommended_ids.update(row.recommended_ids_set)
         seed_tmdb_ids.add(int(row.tmdb_id))
         seed_titles.append(str(row.title))
 
@@ -357,6 +435,7 @@ def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
         "seed_keywords": seed_keywords,
         "seed_title_tokens": seed_title_tokens,
         "seed_similar_ids": seed_similar_ids,
+        "seed_recommended_ids": seed_recommended_ids,
     }
 
 
@@ -368,143 +447,6 @@ def derive_seed_query_tokens(seed_signals: dict[str, Any]) -> set[str]:
         tokens.update(tokenize(keyword))
     tokens.difference_update(seed_signals["seed_title_tokens"])
     return {token for token in tokens if len(token) > 2}
-
-
-def build_retrieval_index() -> None:
-    movies = pd.read_csv(ACTIVE_DATA_PATH).fillna("")
-    if RETRIEVAL_DB_PATH.exists():
-        RETRIEVAL_DB_PATH.unlink()
-
-    connection = sqlite3.connect(str(RETRIEVAL_DB_PATH))
-    try:
-        connection.executescript(
-            """
-            CREATE TABLE movies (
-                tmdb_id INTEGER PRIMARY KEY,
-                title TEXT,
-                original_title TEXT,
-                year INTEGER,
-                genres TEXT,
-                overview TEXT,
-                tagline TEXT,
-                keywords TEXT,
-                director TEXT,
-                top_cast TEXT,
-                original_language TEXT,
-                production_countries TEXT,
-                vote_average REAL,
-                vote_count INTEGER,
-                title_root TEXT
-            );
-
-            CREATE VIRTUAL TABLE movies_fts USING fts5(
-                tmdb_id UNINDEXED,
-                title,
-                genres,
-                overview,
-                tagline,
-                keywords,
-                director,
-                top_cast
-            );
-
-            CREATE INDEX idx_movies_title ON movies(title);
-            """
-        )
-
-        rows = []
-        fts_rows = []
-        for row in movies.itertuples(index=False):
-            rows.append(
-                (
-                    int(row.tmdb_id),
-                    str(row.title),
-                    str(row.original_title),
-                    int(row.year),
-                    str(row.genres),
-                    str(row.overview),
-                    str(row.tagline),
-                    str(row.keywords),
-                    str(row.director),
-                    str(row.top_cast),
-                    str(row.original_language),
-                    str(row.production_countries),
-                    float(row.vote_average),
-                    int(row.vote_count),
-                    title_root(row.title),
-                )
-            )
-            fts_rows.append(
-                (
-                    int(row.tmdb_id),
-                    str(row.title),
-                    str(row.genres),
-                    str(row.overview),
-                    str(row.tagline),
-                    str(row.keywords),
-                    str(row.director),
-                    str(row.top_cast),
-                )
-            )
-
-        connection.executemany(
-            """
-            INSERT INTO movies (
-                tmdb_id, title, original_title, year, genres, overview, tagline,
-                keywords, director, top_cast, original_language, production_countries,
-                vote_average, vote_count, title_root
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        connection.executemany(
-            """
-            INSERT INTO movies_fts (
-                tmdb_id, title, genres, overview, tagline, keywords, director, top_cast
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            fts_rows,
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    write_json(
-        RETRIEVAL_DB_META_PATH,
-        {
-            **dataset_fingerprint(ACTIVE_DATA_PATH),
-            "artifact_type": "sqlite_fts",
-            "row_count": int(len(movies)),
-        },
-    )
-
-
-def build_movie_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
-    from sentence_transformers import SentenceTransformer
-
-    movies = pd.read_csv(ACTIVE_DATA_PATH).fillna("")
-    documents = [build_movie_embedding_text(row._asdict()) for row in movies.itertuples(index=False)]
-    model = SentenceTransformer(model_name)
-    embeddings = model.encode(documents, normalize_embeddings=True, batch_size=64, show_progress_bar=True)
-    embeddings = np.asarray(embeddings, dtype=np.float32)
-
-    np.save(EMBEDDINGS_PATH, embeddings)
-    EMBEDDING_IDS_PATH.write_text(json.dumps(movies["tmdb_id"].astype(int).tolist(), indent=2) + "\n")
-    write_json(
-        EMBEDDING_META_PATH,
-        {
-            **dataset_fingerprint(ACTIVE_DATA_PATH),
-            "artifact_type": "semantic_embeddings",
-            "embedding_model": model_name,
-            "embedding_dim": int(embeddings.shape[1]),
-            "row_count": int(len(movies)),
-        },
-    )
-
-
-def refresh_retrieval_artifacts() -> None:
-    build_retrieval_index()
-    build_movie_embeddings()
 
 
 def normalize_history_item(item: Any) -> dict[str, Any] | None:
@@ -551,6 +493,14 @@ def history_rows(history: tuple[tuple[int | None, str], ...]) -> pd.DataFrame:
             if not unseen.empty:
                 rows.append(unseen)
                 seen_ids.update(unseen["tmdb_id"].astype(int).tolist())
+                continue
+        normalized_name = normalize_text(name)
+        if normalized_name in MOVIES_BY_TITLE_VARIANT:
+            matched_ids = [candidate_id for candidate_id in MOVIES_BY_TITLE_VARIANT[normalized_name] if candidate_id not in seen_ids]
+            if matched_ids:
+                unseen = MOVIES[MOVIES["tmdb_id"].isin(matched_ids)]
+                rows.append(unseen)
+                seen_ids.update(unseen["tmdb_id"].astype(int).tolist())
     if not rows:
         return MOVIES.iloc[0:0].copy()
     return pd.concat(rows, ignore_index=True).drop_duplicates(subset=["tmdb_id"])
@@ -581,7 +531,7 @@ def build_retrieval_profile(
     raw_preference_tokens = tokenize(preferences)
     history_context = derive_history_context(history_df)
     negation_context = extract_negation_context(preferences)
-    explicit_genre_targets = extract_explicit_genre_targets(preferences)
+    explicit_genre_targets = extract_explicit_genre_targets(preferences).difference(negation_context["hard_block_genres"])
     seed_df = preference_seed_rows(preferences, history_df)
     seed_signals = derive_seed_signals(seed_df)
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
@@ -593,10 +543,7 @@ def build_retrieval_profile(
         positive_query_tokens.update(tokenize(genre))
 
     negative_tokens = set(negation_context["negative_tokens"])
-
     seed_query_tokens = derive_seed_query_tokens(seed_signals)
-    if similarity_request:
-        positive_query_tokens.update(seed_query_tokens)
 
     lexical_query_text = " ".join(sorted(positive_query_tokens))
     semantic_query_text = str(preferences or "").strip()
@@ -625,14 +572,17 @@ def build_retrieval_profile(
 
 
 def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
-    preferred_themes = sorted(retrieval_profile["raw_positive_tokens"])[:6]
-    if not preferred_themes:
-        fallback_tokens = sorted(token for token in tokenize(preferences) if len(token) > 2 and token not in {"science", "fiction"})[:6]
-        preferred_themes = fallback_tokens
+    normalized = normalize_text(preferences)
+    tone: list[str] = []
+    for pattern, canonical in TONE_PATTERNS:
+        if pattern.search(normalized) and canonical not in tone:
+            tone.append(canonical)
+    year_relevant = bool(YEAR_SIGNAL_RE.search(normalized)) or any(phrase in normalized for phrase in YEAR_SIGNAL_PHRASES)
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
-        "preferred_themes": preferred_themes,
+        "tone": tone[:3],
         "avoid": retrieval_profile["negative_phrases"][:6],
+        "year_relevant": year_relevant,
     }
 
 
@@ -648,6 +598,8 @@ def seed_similarity_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> 
     score += 0.6 * len(retrieval_profile["seed_keywords"].intersection(row["keywords_set"]))
     if int(row["tmdb_id"]) in retrieval_profile["seed_similar_ids"]:
         score += 2.5
+    if int(row["tmdb_id"]) in retrieval_profile.get("seed_recommended_ids", set()):
+        score += 1.8
     return score
 
 
@@ -672,7 +624,7 @@ def genre_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> 
 
 
 def avoid_penalty_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    negative_overlap = len(retrieval_profile["negative_tokens"].intersection(row["search_blob_tokens"]))
+    negative_overlap = len(retrieval_profile["negative_match_tokens"].intersection(row["search_blob_match_tokens"]))
     phrase_hits = sum(
         1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
     )
@@ -738,23 +690,51 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
 
 
 def diversify_candidates(candidates: pd.DataFrame, limit: int) -> pd.DataFrame:
-    selected: list[tuple[float, int]] = []
-    selected_roots: set[str] = set()
-
-    for row in candidates.itertuples():
-        diversity_penalty = 0.0
-        if row.title_root and row.title_root in selected_roots:
-            diversity_penalty += 0.25
-        adjusted_score = float(row.second_stage_score) - diversity_penalty
-        if len(selected) < limit:
-            selected.append((adjusted_score, row.Index))
-            selected_roots.add(row.title_root)
-
-    if not selected:
+    if candidates.empty:
         return candidates.head(limit)
 
-    indices = [idx for _, idx in sorted(selected, key=lambda item: item[0], reverse=True)]
+    primary_indices: list[int] = []
+    deferred_indices: list[int] = []
+    seen_roots: set[str] = set()
+
+    for row in candidates.itertuples():
+        if row.title_root and row.title_root in seen_roots:
+            deferred_indices.append(row.Index)
+            continue
+        primary_indices.append(row.Index)
+        if row.title_root:
+            seen_roots.add(row.title_root)
+
+    indices = primary_indices[:limit]
+    if len(indices) < limit:
+        indices.extend(deferred_indices[: max(0, limit - len(indices))])
+
     return candidates.loc[indices].sort_values(["second_stage_score", "vote_average", "vote_count"], ascending=False)
+
+
+def filter_semantic_only_candidates(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates
+
+    semantic_only_mask = (candidates["semantic_score"] > 0.0) & (candidates["fts_score"] <= 0.0)
+    if not semantic_only_mask.any():
+        return candidates
+
+    keep_mask = pd.Series(True, index=candidates.index)
+    semantic_only = candidates[semantic_only_mask]
+
+    targets = retrieval_profile["explicit_genre_targets"]
+    if targets:
+        minimum_overlap = 1 if len(targets) == 1 else 2
+        genre_keep = semantic_only["genres_set"].map(lambda genres: len(targets.intersection(genres)) >= minimum_overlap)
+        keep_mask.loc[semantic_only.index] &= genre_keep
+
+    avoid_hits = semantic_only["search_blob_match_tokens"].map(
+        lambda tokens: bool(tokens.intersection(retrieval_profile["negative_match_tokens"]))
+    )
+    keep_mask.loc[semantic_only.index] &= ~avoid_hits
+
+    return candidates[keep_mask].copy()
 
 
 def _candidate_frame(
@@ -821,14 +801,30 @@ def build_candidate_pool(
     except Exception:
         semantic_hits = []
 
-    candidates = _candidate_frame(lexical_hits, semantic_hits, retrieval_profile, mode)
+    resolved_mode = mode
+    if mode == "hybrid":
+        has_lexical = bool(lexical_hits)
+        has_semantic = bool(semantic_hits)
+        if has_lexical and has_semantic:
+            resolved_mode = "hybrid"
+        elif has_semantic:
+            resolved_mode = "semantic"
+        elif has_lexical:
+            resolved_mode = "lexical"
+
+    candidates = _candidate_frame(lexical_hits, semantic_hits, retrieval_profile, resolved_mode)
+    candidates = filter_semantic_only_candidates(candidates, retrieval_profile)
     if candidates.empty:
         fallback, fallback_profile = local_fallback_candidates(preferences, history)
         return fallback, fallback_profile, "local_fallback"
 
     candidates["second_stage_score"] = candidates.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)
     candidates = candidates.sort_values(["second_stage_score", "semantic_score", "fts_score", "vote_average", "vote_count"], ascending=False)
-    return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile, mode
+    retrieval_profile = dict(retrieval_profile)
+    retrieval_profile["lexical_hit_count"] = len(lexical_hits)
+    retrieval_profile["semantic_hit_count"] = len(semantic_hits)
+    retrieval_profile["semantic_active"] = bool(semantic_hits)
+    return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile, resolved_mode
 
 
 def build_shortlist(

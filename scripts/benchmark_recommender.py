@@ -1,16 +1,21 @@
 import json
 import os
+import queue
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import llm
 import llm_baseline
 
-
-ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 CASES_PATH = DATA_DIR / "evaluation_cases.json"
 RESULTS_CSV = DATA_DIR / "benchmark_results.csv"
@@ -81,8 +86,7 @@ def improved_pick(
     normalized_history: tuple[tuple[int | None, str], ...],
 ) -> dict[str, Any]:
     payload = llm.get_recommendation(preferences, history_payload)
-    retrieval_mode = _infer_improved_retrieval_mode(preferences, normalized_history)
-    return _enrich_result(payload, retrieval_mode=retrieval_mode)
+    return _enrich_result(payload, retrieval_mode="")
 
 
 def _validate_payload(payload: Any) -> tuple[bool, bool, str]:
@@ -97,6 +101,58 @@ def _validate_payload(payload: Any) -> tuple[bool, bool, str]:
     return True, False, ""
 
 
+def _invoke_agent(
+    agent_name: str,
+    preferences: str,
+    history_payload: list[dict[str, Any]],
+    normalized_history: tuple[tuple[int | None, str], ...],
+) -> dict[str, Any]:
+    if agent_name == "improved":
+        return improved_pick(preferences, history_payload, normalized_history)
+    if agent_name == "baseline":
+        return baseline_pick(preferences, history_payload)
+    raise ValueError(f"unknown agent: {agent_name}")
+
+
+def _run_with_hard_timeout(
+    agent_name: str,
+    preferences: str,
+    history_payload: list[dict[str, Any]],
+    normalized_history: tuple[tuple[int | None, str], ...],
+) -> tuple[Any, float, bool, bool, str]:
+    result_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            payload = _invoke_agent(agent_name, preferences, history_payload, normalized_history)
+            result_queue.put({"payload": payload})
+        except json.JSONDecodeError as exc:
+            result_queue.put({"payload": None, "invalid_json": True, "error": f"invalid json: {exc}"})
+        except Exception as exc:
+            result_queue.put({"payload": None, "invalid_json": False, "error": str(exc)})
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    start = time.perf_counter()
+    worker.start()
+    worker.join(HARD_TIMEOUT_SECONDS)
+    elapsed_seconds = time.perf_counter() - start
+
+    if worker.is_alive():
+        return None, round(HARD_TIMEOUT_SECONDS, 3), True, False, "timed out"
+
+    if result_queue.empty():
+        return None, round(elapsed_seconds, 3), False, True, "worker exited without a result"
+
+    outcome = result_queue.get_nowait()
+    return (
+        outcome.get("payload"),
+        round(elapsed_seconds, 3),
+        False,
+        bool(outcome.get("invalid_json", False)),
+        str(outcome.get("error", "")),
+    )
+
+
 def _seen_recommendation(result: dict[str, Any], history: tuple[tuple[int | None, str], ...]) -> bool:
     history_ids = {tmdb_id for tmdb_id, _ in history if tmdb_id is not None}
     history_titles = {llm._normalize_text(name) for _, name in history if name}
@@ -109,31 +165,29 @@ def run_system(
     history_payload: list[dict[str, Any]],
     normalized_history: tuple[tuple[int | None, str], ...],
 ) -> dict[str, Any]:
-    start = time.perf_counter()
-    payload: Any = None
-    error = ""
-    invalid_json = False
-
-    try:
-        if agent_name == "improved":
-            payload = improved_pick(preferences, history_payload, normalized_history)
-        elif agent_name == "baseline":
-            payload = baseline_pick(preferences, history_payload)
-        else:
-            raise ValueError(f"unknown agent: {agent_name}")
-    except json.JSONDecodeError as exc:
-        error = f"invalid json: {exc}"
-        invalid_json = True
-    except Exception as exc:
-        error = str(exc)
-
-    elapsed_seconds = time.perf_counter() - start
-    timed_out = elapsed_seconds > HARD_TIMEOUT_SECONDS
+    payload, elapsed_seconds, timed_out, invalid_json, error = _run_with_hard_timeout(
+        agent_name,
+        preferences,
+        history_payload,
+        normalized_history,
+    )
 
     payload_ok, schema_invalid, schema_error = _validate_payload(payload)
-    invalid_json = invalid_json or schema_invalid
-    if not error and schema_error:
+    if payload is not None:
+        invalid_json = invalid_json or schema_invalid
+    if not error and schema_error and payload is not None:
         error = schema_error
+
+    retrieval_mode = ""
+    if payload_ok:
+        if agent_name == "baseline":
+            retrieval_mode = "baseline_top5"
+        else:
+            try:
+                retrieval_mode = _infer_improved_retrieval_mode(preferences, normalized_history)
+            except Exception as exc:
+                if not error:
+                    error = f"retrieval mode lookup failed: {exc}"
 
     tmdb_on_list = bool(payload_ok and int(payload["tmdb_id"]) in llm.MOVIES_BY_TMDB_ID.index)
     seen_repeat = bool(payload_ok and _seen_recommendation(payload, normalized_history))
@@ -148,14 +202,14 @@ def run_system(
 
     return {
         "payload": payload if payload_ok else None,
-        "elapsed_seconds": round(elapsed_seconds, 3),
+        "elapsed_seconds": elapsed_seconds,
         "timed_out": timed_out,
         "invalid_json": invalid_json,
         "tmdb_on_list": tmdb_on_list,
         "seen_repeat": seen_repeat,
         "hard_constraint_pass": hard_constraint_pass,
         "used_llm": bool(payload_ok and bool(payload.get("used_llm", True))),
-        "retrieval_mode": str(payload.get("retrieval_mode", "")) if payload_ok else "",
+        "retrieval_mode": retrieval_mode,
         "has_error": bool(error),
         "error": error,
     }

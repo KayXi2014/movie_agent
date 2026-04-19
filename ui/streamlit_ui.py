@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -25,6 +24,12 @@ def load_movies() -> pd.DataFrame:
 MOVIES_DF = load_movies()
 
 st.set_page_config(page_title="Movie Recommender UI", page_icon="🎬", layout="centered")
+
+DEBUG_MODE_OPTIONS = {
+    "Auto (recommended)": "auto",
+    "Lexical only": "lexical",
+    "Full local pipeline": "hybrid",
+}
 
 
 def lookup_title(tmdb_id: Any) -> str:
@@ -82,15 +87,60 @@ def render_result(data: dict[str, Any], elapsed: float, source_label: str) -> No
     st.write(data.get("description", ""))
 
 
-def render_shortlist_debug(payload: dict[str, Any]) -> None:
+def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
+    import semantic_retrieval as sr
+
     normalized_history = normalize_history(payload["history"])
-    shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(payload["preferences"], normalized_history)
+    semantic_status_fn = getattr(sr, "semantic_runtime_status", None)
+    if callable(semantic_status_fn):
+        semantic_status = semantic_status_fn()
+    else:
+        semantic_status = {
+            "ready": bool(getattr(sr, "semantic_ready", lambda: False)()),
+            "reason": "legacy_module_without_status",
+            "model_name": None,
+        }
+    requested_mode = DEBUG_MODE_OPTIONS.get(debug_mode, "auto")
+    if requested_mode == "auto":
+        requested_mode = "hybrid" if semantic_status["ready"] else "lexical"
+
+    try:
+        shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
+            payload["preferences"],
+            normalized_history,
+            mode=requested_mode,
+        )
+        effective_mode = requested_mode
+    except ModuleNotFoundError as exc:
+        if requested_mode != "hybrid":
+            raise
+        shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
+            payload["preferences"],
+            normalized_history,
+            mode="lexical",
+        )
+        effective_mode = "lexical"
+        st.info(
+            "Local semantic debug is unavailable in this environment "
+            f"({exc}). Showing lexical-only debug instead."
+        )
 
     st.markdown("### Retrieval Debug")
     st.caption(
+        f"Debug mode: {effective_mode} | "
         f"Retrieval mode: {retrieval_profile.get('retrieval_mode', 'unknown')} | "
-        f"Candidates shown: {len(shortlist_refs)}"
+        f"Candidates shown: {len(shortlist_refs)} | "
+        f"Semantic hits: {retrieval_profile.get('semantic_hit_count', 0)}"
     )
+
+    if effective_mode == "lexical":
+        if semantic_status["ready"]:
+            st.info("Semantic retrieval is available in this environment, but debug is currently running in lexical-only mode.")
+        else:
+            st.info(
+                "Semantic retrieval is unavailable in this Streamlit process, so semantic scores will stay at 0. "
+                f"Reason: {semantic_status['reason']}."
+            )
 
     if prompt_profile.get("preferred_themes") or prompt_profile.get("avoid") or prompt_profile.get("target_genres"):
         debug_summary = {
@@ -121,9 +171,16 @@ st.caption("Frontend for the FastAPI movie recommendation endpoint, with optiona
 
 with st.sidebar:
     st.header("API Settings")
-    api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8000")
+    api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8080")
     request_timeout = st.number_input("Request timeout (seconds)", min_value=1, max_value=120, value=25)
     show_local_debug = st.checkbox("Show retrieval debug", value=True)
+    debug_mode = st.selectbox(
+        "Debug mode",
+        options=list(DEBUG_MODE_OPTIONS),
+        index=0,
+        disabled=not show_local_debug,
+        help="Auto uses semantic retrieval when this Streamlit process can load the local embedding model.",
+    )
 
 st.subheader("User Inputs")
 
@@ -212,9 +269,12 @@ if st.button("Get Recommendation", type="primary"):
 
                 if show_local_debug:
                     st.markdown("## Retrieval Debug")
-                    st.caption("This debug panel is generated locally from the retrieval pipeline only. It does not trigger a second recommendation call.")
+                    st.caption(
+                        "This debug panel is generated locally from the retrieval pipeline only. "
+                        "It does not trigger a second recommendation call."
+                    )
                     try:
-                        render_shortlist_debug(payload)
+                        render_shortlist_debug(payload, debug_mode)
                     except Exception as exc:
                         st.warning(f"Retrieval debug failed: {exc}")
             else:

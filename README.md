@@ -25,10 +25,10 @@ agentic-movie-recommender/
    - a simplified semantic-first rerank with explicit genre/avoid filtering
    - light diversification
 3. `retrieval.py` returns:
-   - a shortlist of up to 20 candidates
+   - a shortlist of up to 15 candidates
    - a lean prompt profile with only:
      - `target_genres`
-     - `preferred_themes`
+     - `tone` (when the request clearly expresses one)
      - `avoid`
 4. The final LLM sees the raw request, compact shortlist, avoid/watch-history hints, and returns:
    - `tmdb_id`
@@ -68,7 +68,7 @@ python -m scripts.prepare_local_runtime
 
 What it does:
 
-- optionally rebuilds `data/tmdb_top1000_movies_enriched.csv` if `TMDB_API_KEY` is set
+- optionally rebuilds `data/tmdb_top1000_movies_enriched.csv` if TMDB credentials are set
 - rebuilds the retrieval database and text-embedding artifacts used by semantic retrieval:
   - `data/movies.sqlite`
   - `data/movies.sqlite.meta.json`
@@ -76,7 +76,7 @@ What it does:
   - `data/movie_embedding_ids.json`
   - `data/movie_embedding_meta.json`
 
-You do not need to run `scripts.build_retrieval_index` or `scripts.build_movie_embeddings` separately unless you specifically want those lower-level maintenance commands.
+You do not need to run `scripts.text_artifacts` separately unless you specifically want those lower-level maintenance commands.
 
 If you want TMDB enrichment in that step:
 
@@ -217,14 +217,14 @@ The benchmark keeps the existing scoring emphasis:
 Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` already covers the normal end-to-end local prep flow, including rebuilding the text embeddings.
 
 ```bash
-python -m scripts.build_enriched_dataset
-python -m scripts.build_retrieval_index
-python -m scripts.build_movie_embeddings
+python -m scripts.tmdb_enrichment
+python -m scripts.text_artifacts --target index
+python -m scripts.text_artifacts --target embeddings
 python -m scripts.prepare_local_runtime
 python -m scripts.benchmark_recommender
 ```
 
-`scripts/tmdb_client.py` is offline-only and is not used by the deployed API.
+`scripts/tmdb_enrichment.py` and `scripts/text_artifacts.py` are offline-only and are not used by the deployed API.
 
 ## Notes
 

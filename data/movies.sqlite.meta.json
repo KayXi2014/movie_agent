@@ -2,7 +2,7 @@
   "artifact_type": "sqlite_fts",
   "row_count": 1000,
   "source_name": "tmdb_top1000_movies_enriched.csv",
-  "source_path": "tmdb_top1000_movies_enriched.csv",
-  "source_sha256": "7f43a6db12773d4db4fd195a7dff2b343c388e9938d37f5a54daba7f2c2fc2dd",
-  "source_size": 1063367
+  "source_path": "data\\tmdb_top1000_movies_enriched.csv",
+  "source_sha256": "64ef2046cd7d98112076539364acd713ad0a2c1209d86260f8dd1bba57fe6c06",
+  "source_size": 1648647
 }
