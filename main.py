@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 
 from llm import TOP_MOVIES, get_recommendation
@@ -92,3 +92,13 @@ async def recommend(request: RecommendRequest):
 @app.get("/")
 def health():
     return {"status": "ok", "candidates": len(TOP_MOVIES)}
+
+
+@app.get("/kaithhealthcheck")
+def leapcell_healthcheck():
+    return {"status": "ok"}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)

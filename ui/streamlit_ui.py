@@ -13,7 +13,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from llm import _extract_query_hints_cached
 from retrieval import build_shortlist, normalize_history
 
 
@@ -85,16 +84,7 @@ def render_result(data: dict[str, Any], elapsed: float, source_label: str) -> No
 
 def render_shortlist_debug(payload: dict[str, Any]) -> None:
     normalized_history = normalize_history(payload["history"])
-    try:
-        query_hints, avoid_hints = _extract_query_hints_cached(payload["preferences"])
-    except Exception:
-        query_hints, avoid_hints = (), ()
-    shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
-        payload["preferences"],
-        normalized_history,
-        query_hints=query_hints,
-        avoid_hints=avoid_hints,
-    )
+    shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(payload["preferences"], normalized_history)
 
     st.markdown("### Retrieval Debug")
     st.caption(
@@ -102,12 +92,9 @@ def render_shortlist_debug(payload: dict[str, Any]) -> None:
         f"Candidates shown: {len(shortlist_refs)}"
     )
 
-    if prompt_profile.get("preferred_themes") or prompt_profile.get("avoid") or prompt_profile.get("target_genres") or query_hints:
+    if prompt_profile.get("preferred_themes") or prompt_profile.get("avoid") or prompt_profile.get("target_genres"):
         debug_summary = {
-            "query_hints": list(query_hints),
-            "avoid_hints": list(avoid_hints),
             "target_genres": prompt_profile.get("target_genres", []),
-            "preferred_tones": prompt_profile.get("preferred_tones", []),
             "preferred_themes": prompt_profile.get("preferred_themes", []),
             "avoid": prompt_profile.get("avoid", []),
         }

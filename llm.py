@@ -33,7 +33,6 @@ from retrieval import (
 
 
 LLM_STAGE_BUDGET_SECONDS = 18.0
-QUERY_HINT_TIMEOUT_SECONDS = 6.0
 SELECTION_LLM_TIMEOUT_SECONDS = 12.0
 MODEL = "gemma4:31b-cloud"
 logger = logging.getLogger(__name__)
@@ -124,72 +123,6 @@ def _resolve_selected_tmdb_id(selection_payload: dict[str, Any], shortlist: list
     raise ValueError(f"Model did not return a usable shortlist selection: {selection_payload}")
 
 
-def _build_query_hint_prompt(preferences: str) -> str:
-    return (
-        "Extract short retrieval hints from this movie request.\n"
-        "Return raw JSON only.\n"
-        'Format: {"must_have": ["..."], "avoid": ["..."]}\n'
-        "Rules: include 3 to 6 short must-have hints grounded in genre, source material, tone, theme, story setup, or format. "
-        "Include avoid only for explicit constraints. Convert vague requests into concrete movie traits. "
-        "Do not include filler or discourse words like good, great, interesting, find me, lately, different, completely, been, or must have unless they point to a concrete movie trait. "
-        "If the user wants novelty, express that as concrete traits or contrasts, not as words like different or new.\n\n"
-        f"Request: {preferences}"
-    )
-
-
-def _sanitize_query_hints(payload: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    banned = {
-        "been",
-        "completely",
-        "different",
-        "find me",
-        "good",
-        "great",
-        "interesting",
-        "give",
-        "i've",
-        "ive",
-        "lately",
-        "movie",
-        "movies",
-        "must have",
-        "new",
-    }
-
-    def _coerce_list(value: Any, limit: int) -> tuple[str, ...]:
-        if not isinstance(value, list):
-            return ()
-        cleaned: list[str] = []
-        for item in value:
-            text = " ".join(str(item or "").strip().split())
-            if not text:
-                continue
-            normalized = _normalize_text(text)
-            if normalized in banned:
-                continue
-            if normalized not in cleaned:
-                cleaned.append(normalized)
-            if len(cleaned) >= limit:
-                break
-        return tuple(cleaned)
-
-    return _coerce_list(payload.get("must_have"), 6), _coerce_list(payload.get("avoid"), 4)
-
-
-@lru_cache(maxsize=256)
-def _extract_query_hints_cached(preferences: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    prompt = _build_query_hint_prompt(preferences)
-    response = _get_client(QUERY_HINT_TIMEOUT_SECONDS).chat(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        format="json",
-    )
-    payload = _extract_json_object(response.message.content)
-    if isinstance(payload.get("query"), dict):
-        payload = payload["query"]
-    return _sanitize_query_hints(payload)
-
-
 def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
@@ -197,29 +130,49 @@ def _build_selection_prompt(
     history_exclusion_text: str,
 ) -> str:
     avoid_text = ", ".join(prompt_profile["avoid"][:4]) if prompt_profile["avoid"] else "none"
-    history_hint = _build_history_exposure_hint(prompt_profile, history_exclusion_text)
+    history_hint = _build_history_exposure_hint(history_exclusion_text)
 
-    def _short_hook(movie: dict[str, Any]) -> str:
-        if movie["keywords"]:
-            bits = [
-                part.strip()
-                for part in str(movie["keywords"]).split(",")
-                if part.strip() and part.strip().lower() not in {"sequel", "prequel", "franchise", "part one", "part two"}
-            ]
-            if bits:
-                return ", ".join(bits[:4])
-        overview = str(movie["overview"] or "").strip()
-        if not overview:
-            return "clear premise"
-        trimmed = overview[:64].rstrip()
+    def _trim_text(value: Any, limit: int) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        trimmed = text[:limit].rstrip()
         last_space = trimmed.rfind(" ")
-        if len(overview) > 64 and last_space > 28:
+        if len(text) > limit and last_space > max(20, limit // 2):
             trimmed = trimmed[:last_space]
-        return trimmed
+        return trimmed.rstrip(" ,.;:")
+
+    def _csv_head(value: Any, limit: int) -> str:
+        items = [part.strip() for part in str(value or "").split(",") if part.strip()]
+        return ", ".join(items[:limit])
 
     def _fmt(movie: dict[str, Any]) -> str:
-        genres = ", ".join(part.strip() for part in str(movie["genres"]).split(",")[:2] if part.strip()) or "movie"
-        return f'{movie["tmdb_id"]} | {movie["title"]} | {genres} | {_short_hook(movie)}'
+        parts = [f'{movie["tmdb_id"]} | {movie["title"]} ({movie["year"]})']
+
+        genres = _csv_head(movie["genres"], 3)
+        if genres:
+            parts.append(f"genres: {genres}")
+
+        director = _trim_text(movie.get("director"), 40)
+        if director:
+            parts.append(f"director: {director}")
+
+        cast = _csv_head(movie.get("top_cast"), 2)
+        if cast:
+            parts.append(f"cast: {cast}")
+
+        keywords = _csv_head(movie.get("keywords"), 4)
+        if keywords:
+            parts.append(f"keywords: {keywords}")
+
+        tagline = _trim_text(movie.get("tagline"), 70)
+        if tagline:
+            parts.append(f"tagline: {tagline}")
+
+        premise = _trim_text(movie.get("overview"), 120) or "clear premise"
+        parts.append(f"premise: {premise}")
+
+        return " | ".join(parts)
 
     shortlist_text = "\n".join(_fmt(movie) for movie in shortlist)
 
@@ -232,6 +185,7 @@ def _build_selection_prompt(
         f"{shortlist_text}\n\n"
         "Pick the best fit and write like a sharp, thoughtful friend.\n"
         "Be concrete, direct, and persuasive.\n"
+        "Use the candidate details carefully: genre, premise, keywords, year, director, cast, and tagline can all matter.\n"
         "Only make claims that are supported by the candidate line and the user's request. Do not invent extra facts or qualities that are not grounded in the provided information.\n"
         "Return raw JSON only.\n"
         'Format: {"tmdb_id": <candidate id>, "title": "<exact shortlisted title>", "description": "<2 or 3 sentences, under 500 chars>"}\n'
@@ -256,8 +210,8 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
         else:
             hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
 
-    tones = set(prompt_profile.get("preferred_tones", []))
-    if {"bad", "fun", "laugh"}.intersection(tones):
+    themes = set(prompt_profile.get("preferred_themes", []))
+    if {"bad", "fun", "funny", "friends", "laugh"}.intersection(themes):
         fit_line = "If you want something loose, silly, and easy to laugh at with friends, this is the kind of pick that works better once everyone starts leaning into the chaos."
     elif prompt_profile["preferred_themes"]:
         reason = ", ".join(prompt_profile["preferred_themes"][:3])
@@ -283,9 +237,13 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]]) -> list[dict[str, An
             {
                 "tmdb_id": tmdb_id,
                 "title": str(row["title"]),
+                "year": int(row["year"]) if str(row.get("year", "")).strip() else 0,
                 "genres": str(row["genres"]),
                 "overview": str(row["overview"])[:220],
                 "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
+                "director": str(row.get("director", "")),
+                "top_cast": str(row.get("top_cast", "")),
+                "tagline": str(row.get("tagline", ""))[:120],
                 "score": ref.get("score", 0.0),
                 "semantic_score": ref.get("semantic_score", 0.0),
                 "fts_score": ref.get("fts_score", 0.0),
@@ -294,23 +252,10 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]]) -> list[dict[str, An
     return enriched
 
 
-def _build_history_exposure_hint(prompt_profile: dict[str, Any], history_exclusion_text: str) -> str:
-    history_signals = prompt_profile.get("history_signals", {})
-    bits = []
-    liked_genres = history_signals.get("liked_genres", [])
-    liked_directors = history_signals.get("liked_directors", [])
-    liked_cast = history_signals.get("liked_cast", [])
-
-    if liked_genres:
-        bits.append("they have already seen some " + ", ".join(liked_genres[:2]) + " movies")
-    if liked_directors:
-        bits.append("they have watched work from " + ", ".join(liked_directors[:2]))
-    if liked_cast:
-        bits.append("they have already seen titles with " + ", ".join(liked_cast[:2]))
-
-    if bits:
-        return "; ".join(bits) + "; avoid repeating the same movie or something overly familiar unless the request clearly points there"
-    return history_exclusion_text.replace("use history primarily to avoid re-recommending already watched titles", "avoid repeating the same movie or something too obviously repetitive")
+def _build_history_exposure_hint(history_exclusion_text: str) -> str:
+    if history_exclusion_text == "none":
+        return "none"
+    return "avoid repeating the same movie or something too obviously similar to the watch history"
 
 
 def _choose_with_llm(
@@ -340,22 +285,7 @@ def _choose_with_llm(
 
 @lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
-    try:
-        query_hints, avoid_hints = _extract_query_hints_cached(preferences)
-    except Exception as exc:
-        logger.warning(
-            "Falling back to raw retrieval query: preferences_len=%d error=%s",
-            len(preferences),
-            exc,
-        )
-        query_hints, avoid_hints = (), ()
-
-    shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(
-        preferences,
-        history,
-        query_hints=query_hints,
-        avoid_hints=avoid_hints,
-    )
+    shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
     shortlist = _enrich_shortlist(shortlist_refs)
     if not shortlist:
         raise ValueError("No candidate movies available")

@@ -19,12 +19,18 @@ agentic-movie-recommender/
 ## Current Runtime Flow
 
 1. `POST /recommend` enters through `main.py`
-2. `llm.py` asks a tiny LLM step for retrieval hints
-3. `retrieval.py` builds a broad local candidate pool using:
+2. `retrieval.py` builds a broad local candidate pool using:
    - SQLite + FTS5 lexical retrieval
    - precomputed embedding similarity
-   - light reranking and diversification
-4. The final LLM sees a compact candidate list and returns:
+   - a simplified semantic-first rerank with explicit genre/avoid filtering
+   - light diversification
+3. `retrieval.py` returns:
+   - a shortlist of up to 20 candidates
+   - a lean prompt profile with only:
+     - `target_genres`
+     - `preferred_themes`
+     - `avoid`
+4. The final LLM sees the raw request, compact shortlist, avoid/watch-history hints, and returns:
    - `tmdb_id`
    - a recommendation description capped at 500 characters
 5. If the final LLM fails, the app falls back to a deterministic local choice
@@ -63,12 +69,14 @@ python -m scripts.prepare_local_runtime
 What it does:
 
 - optionally rebuilds `data/tmdb_top1000_movies_enriched.csv` if `TMDB_API_KEY` is set
-- rebuilds:
+- rebuilds the retrieval database and text-embedding artifacts used by semantic retrieval:
   - `data/movies.sqlite`
   - `data/movies.sqlite.meta.json`
   - `data/movie_embeddings.npy`
   - `data/movie_embedding_ids.json`
   - `data/movie_embedding_meta.json`
+
+You do not need to run `scripts.build_retrieval_index` or `scripts.build_movie_embeddings` separately unless you specifically want those lower-level maintenance commands.
 
 If you want TMDB enrichment in that step:
 
@@ -206,7 +214,7 @@ The benchmark keeps the existing scoring emphasis:
 
 ## Offline Scripts
 
-Useful maintenance commands:
+Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` already covers the normal end-to-end local prep flow, including rebuilding the text embeddings.
 
 ```bash
 python -m scripts.build_enriched_dataset
@@ -223,3 +231,4 @@ python -m scripts.benchmark_recommender
 - The deployed API does not expose internal debug fields like `used_llm`.
 - The Streamlit app is for local inspection only; it is not part of the production deployment.
 - Watch history is used primarily for exclusion and anti-repeat behavior, not as guaranteed taste evidence.
+- Retrieval no longer uses a separate pre-retrieval LLM step; the only live model call in the request path is the final recommendation-selection call.

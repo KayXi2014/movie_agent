@@ -71,16 +71,7 @@ def baseline_pick(preferences: str, history_payload: list[dict[str, Any]]) -> di
 
 
 def _infer_improved_retrieval_mode(preferences: str, normalized_history: tuple[tuple[int | None, str], ...]) -> str:
-    try:
-        query_hints, avoid_hints = llm._extract_query_hints_cached(preferences)
-    except Exception:
-        query_hints, avoid_hints = (), ()
-    _, _, retrieval_profile = llm._build_shortlist(
-        preferences,
-        normalized_history,
-        query_hints=query_hints,
-        avoid_hints=avoid_hints,
-    )
+    _, _, retrieval_profile = llm._build_shortlist(preferences, normalized_history)
     return str(retrieval_profile.get("retrieval_mode", "unknown"))
 
 

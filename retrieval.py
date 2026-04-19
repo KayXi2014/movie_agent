@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 
-SHORTLIST_SIZE = 30
+SHORTLIST_SIZE = 20
 FTS_LIMIT = 40
 SEMANTIC_LIMIT = 40
 MERGED_POOL_SIZE = 60
@@ -337,21 +337,15 @@ def preference_seed_rows(preferences: str, history_df: pd.DataFrame) -> pd.DataF
 def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
     seed_genres: set[str] = set()
     seed_keywords: set[str] = set()
-    seed_cast: set[str] = set()
-    seed_directors: set[str] = set()
     seed_title_tokens: set[str] = set()
-    seed_story_tokens: set[str] = set()
     seed_similar_ids: set[int] = set()
     seed_tmdb_ids: set[int] = set()
     seed_titles: list[str] = []
 
     for row in seed_df.itertuples():
         seed_genres.update(row.genres_set)
-        seed_keywords.update(set(sorted(row.keywords_set)[:12]))
-        seed_cast.update(set(sorted(row.cast_set)[:6]))
-        seed_directors.update(set(sorted(row.director_set)[:4]))
+        seed_keywords.update(set(sorted(row.keywords_set)[:10]))
         seed_title_tokens.update(tokenize(row.title))
-        seed_story_tokens.update(tokenize(row.overview))
         seed_similar_ids.update(row.similar_ids_set)
         seed_tmdb_ids.add(int(row.tmdb_id))
         seed_titles.append(str(row.title))
@@ -361,10 +355,7 @@ def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
         "seed_tmdb_ids": seed_tmdb_ids,
         "seed_genres": seed_genres,
         "seed_keywords": seed_keywords,
-        "seed_cast": seed_cast,
-        "seed_directors": seed_directors,
         "seed_title_tokens": seed_title_tokens,
-        "seed_story_tokens": seed_story_tokens,
         "seed_similar_ids": seed_similar_ids,
     }
 
@@ -565,21 +556,15 @@ def history_rows(history: tuple[tuple[int | None, str], ...]) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True).drop_duplicates(subset=["tmdb_id"])
 
 
-def derive_history_signals(history_df: pd.DataFrame) -> dict[str, set[str]]:
+def derive_history_context(history_df: pd.DataFrame) -> dict[str, set[str]]:
     genre_counts: Counter[str] = Counter()
-    cast_counts: Counter[str] = Counter()
-    director_counts: Counter[str] = Counter()
     watched_roots: set[str] = set()
     for row in history_df.itertuples():
         genre_counts.update(item for item in row.genres_set if item)
-        cast_counts.update(item for item in row.cast_set if item)
-        director_counts.update(item for item in row.director_set if item)
         if row.title_root:
             watched_roots.add(row.title_root)
     return {
-        "liked_genres": {name for name, _ in genre_counts.most_common(3)},
-        "liked_cast": {name for name, count in cast_counts.most_common(6) if count >= 2},
-        "liked_directors": {name for name, count in director_counts.most_common(4) if count >= 2},
+        "watched_genres": {name for name, _ in genre_counts.most_common(3)},
         "watched_roots": watched_roots,
     }
 
@@ -591,43 +576,30 @@ def history_prompt_text(history_count: int) -> str:
 def build_retrieval_profile(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
-    query_hints: tuple[str, ...] = (),
-    avoid_hints: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     history_df = history_rows(history)
     raw_preference_tokens = tokenize(preferences)
-    history_signals = derive_history_signals(history_df)
+    history_context = derive_history_context(history_df)
     negation_context = extract_negation_context(preferences)
     explicit_genre_targets = extract_explicit_genre_targets(preferences)
     seed_df = preference_seed_rows(preferences, history_df)
     seed_signals = derive_seed_signals(seed_df)
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
 
-    query_hint_tokens = set()
-    for hint in query_hints:
-        query_hint_tokens.update(tokenize(hint))
-        explicit_genre_targets.update(extract_explicit_genre_targets(hint))
-
-    if query_hint_tokens:
-        positive_query_tokens = set(query_hint_tokens)
-    else:
-        positive_query_tokens = set(negation_context["positive_query_tokens"])
+    positive_query_tokens = set(negation_context["positive_query_tokens"])
     positive_query_tokens.difference_update(seed_signals["seed_title_tokens"])
 
     for genre in explicit_genre_targets:
         positive_query_tokens.update(tokenize(genre))
 
     negative_tokens = set(negation_context["negative_tokens"])
-    for hint in avoid_hints:
-        negative_tokens.update(tokenize(hint))
 
     seed_query_tokens = derive_seed_query_tokens(seed_signals)
     if similarity_request:
         positive_query_tokens.update(seed_query_tokens)
 
     lexical_query_text = " ".join(sorted(positive_query_tokens))
-    semantic_hint_text = " ".join(query_hints).strip()
-    semantic_query_text = " ".join(part for part in [str(preferences or "").strip(), semantic_hint_text] if part).strip()
+    semantic_query_text = str(preferences or "").strip()
     if not semantic_query_text:
         semantic_query_text = lexical_query_text
 
@@ -646,29 +618,21 @@ def build_retrieval_profile(
         "semantic_query_text": semantic_query_text,
         "similarity_request": similarity_request,
         "exclude_seed_tmdb_ids": seed_signals["seed_tmdb_ids"] if similarity_request else set(),
-        "query_hints": query_hints,
-        "avoid_hints": avoid_hints,
         **seed_signals,
         "seed_query_tokens": seed_query_tokens,
-        **history_signals,
+        **history_context,
     }
 
 
 def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
-    preferred_themes = sorted(retrieval_profile["positive_query_tokens"])[:6]
+    preferred_themes = sorted(retrieval_profile["raw_positive_tokens"])[:6]
     if not preferred_themes:
         fallback_tokens = sorted(token for token in tokenize(preferences) if len(token) > 2 and token not in {"science", "fiction"})[:6]
         preferred_themes = fallback_tokens
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
-        "preferred_tones": sorted(retrieval_profile["subjective_tokens"])[:4],
         "preferred_themes": preferred_themes,
-        "avoid": (retrieval_profile["negative_phrases"] + list(retrieval_profile.get("avoid_hints", ())))[:6],
-        "history_signals": {
-            "liked_genres": sorted(retrieval_profile["liked_genres"])[:6],
-            "liked_directors": sorted(retrieval_profile["liked_directors"])[:4],
-            "liked_cast": sorted(retrieval_profile["liked_cast"])[:6],
-        },
+        "avoid": retrieval_profile["negative_phrases"][:6],
     }
 
 
@@ -676,78 +640,54 @@ def build_query_text(preferences: str, retrieval_profile: dict[str, Any]) -> str
     return retrieval_profile["lexical_query_text"] or str(preferences or "").strip()
 
 
-def appeal_score(row: pd.Series) -> float:
-    score = min(float(row["vote_average"]) or 0.0, 10.0) * 0.35
-    score += min(float(row["vote_count"]) or 0.0, 8000.0) / 4000.0
-    if row["tagline"]:
-        score += 0.8
-    hook_terms = {"friendship", "heist", "mission", "rivalry", "secret", "love", "romance", "detective", "superhero", "haunted", "ghost", "survival", "future", "betrayal", "adventure", "family", "team"}
-    score += 0.35 * len(hook_terms.intersection(row["search_blob_tokens"]))
-    if row["director"]:
-        score += 0.2
-    if row["top_cast"]:
-        score += 0.3
-    return score
-
-
-def history_affinity_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    score = 1.2 * len(retrieval_profile["liked_genres"].intersection(row["genres_set"]))
-    score += 1.8 * len(retrieval_profile["liked_directors"].intersection(row["director_set"]))
-    score += 1.0 * len(retrieval_profile["liked_cast"].intersection(row["cast_set"]))
-    return score
-
-
 def seed_similarity_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     if not retrieval_profile.get("similarity_request"):
         return 0.0
     score = 0.0
-    score += 1.4 * len(retrieval_profile["seed_genres"].intersection(row["genres_set"]))
-    score += 0.55 * len(retrieval_profile["seed_keywords"].intersection(row["keywords_set"]))
-    score += 0.18 * len(retrieval_profile["seed_story_tokens"].intersection(row["search_blob_tokens"]))
-    score += 0.8 * len(retrieval_profile["seed_directors"].intersection(row["director_set"]))
-    score += 0.45 * len(retrieval_profile["seed_cast"].intersection(row["cast_set"]))
+    score += 1.6 * len(retrieval_profile["seed_genres"].intersection(row["genres_set"]))
+    score += 0.6 * len(retrieval_profile["seed_keywords"].intersection(row["keywords_set"]))
     if int(row["tmdb_id"]) in retrieval_profile["seed_similar_ids"]:
         score += 2.5
     return score
 
 
-def preference_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+def keyword_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     positive_tokens = retrieval_profile["positive_query_tokens"] or retrieval_profile["raw_preference_tokens"]
-    negative_tokens = retrieval_profile["negative_tokens"]
-    tokens = row["search_blob_tokens"]
+    if not positive_tokens:
+        return 0.0
+    blob_overlap = len(positive_tokens.intersection(row["search_blob_tokens"]))
+    keyword_overlap = len(positive_tokens.intersection(row["keywords_set"]))
+    score = 0.6 * blob_overlap + 0.4 * keyword_overlap
+    return _normalize_component(score, 6.0)
 
-    positive_overlap = len(positive_tokens.intersection(tokens))
-    negative_overlap = len(negative_tokens.intersection(tokens))
 
-    score = 0.7 * positive_overlap
-    score += 0.35 * len(positive_tokens.intersection(row["keywords_set"]))
-    if retrieval_profile["explicit_genre_targets"]:
-        genre_overlap = len(retrieval_profile["explicit_genre_targets"].intersection(row["genres_set"]))
-        score += 2.2 * genre_overlap
-        if genre_overlap == 0:
-            score -= 2.8
-    score -= 2.4 * negative_overlap
-    if retrieval_profile["negative_phrases"]:
-        score -= 1.2 * sum(
-            1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
-        )
-    if negative_overlap and positive_overlap <= 1:
-        score -= 1.5
-    if retrieval_profile["hard_block_genres"].intersection(row["genres_set"]):
-        score -= 3.0
-    return score
+def genre_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+    targets = retrieval_profile["explicit_genre_targets"]
+    if not targets:
+        return 0.0
+    overlap = len(targets.intersection(row["genres_set"]))
+    if overlap <= 0:
+        return -1.0
+    return _normalize_component(float(overlap), float(len(targets)))
+
+
+def avoid_penalty_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+    negative_overlap = len(retrieval_profile["negative_tokens"].intersection(row["search_blob_tokens"]))
+    phrase_hits = sum(
+        1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
+    )
+    hard_block = 1.0 if retrieval_profile["hard_block_genres"].intersection(row["genres_set"]) else 0.0
+    return _normalize_component(float(negative_overlap + phrase_hits) + hard_block * 2.0, 5.0)
+
+
+def quality_prior_score(row: pd.Series) -> float:
+    rating = max(0.0, min(float(row["vote_average"]) / 10.0, 1.0))
+    votes = _normalize_component(float(np.log1p(max(float(row["vote_count"]), 0.0))), float(np.log1p(8000.0)))
+    return 0.65 * rating + 0.35 * votes
 
 
 def novelty_penalty(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     penalty = 4.0 if row["title_root"] and row["title_root"] in retrieval_profile["watched_roots"] else 0.0
-    if retrieval_profile["negative_tokens"] and retrieval_profile["negative_tokens"].intersection(row["search_blob_tokens"]):
-        penalty += 4.0
-    if retrieval_profile["negative_phrases"]:
-        penalty += 1.0 * sum(
-            1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
-        )
-    if retrieval_profile["hard_block_genres"].intersection(row["genres_set"]):
-        penalty += 4.0
     return penalty
 
 
@@ -758,21 +698,26 @@ def _normalize_component(value: float, maximum: float) -> float:
 
 
 def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    history_component = _normalize_component(history_affinity_score(row, retrieval_profile), 6.0)
-    appeal_component = _normalize_component(appeal_score(row), 8.0)
-    novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 7.0)
-    preference_component = _normalize_component(max(0.0, preference_alignment_score(row, retrieval_profile)), 8.0)
-    preference_penalty = _normalize_component(max(0.0, -preference_alignment_score(row, retrieval_profile)), 5.0)
+    semantic_component = float(row.get("semantic_score", 0.0))
+    fts_component = float(row.get("fts_score", 0.0))
+    keyword_component = keyword_alignment_score(row, retrieval_profile)
+    genre_component = genre_alignment_score(row, retrieval_profile)
+    genre_reward = max(0.0, genre_component)
+    genre_penalty = max(0.0, -genre_component)
+    quality_component = quality_prior_score(row)
     seed_component = _normalize_component(seed_similarity_score(row, retrieval_profile), 8.0)
+    avoid_component = avoid_penalty_score(row, retrieval_profile)
+    novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     return (
-        0.42 * float(row.get("semantic_score", 0.0))
-        + 0.23 * float(row.get("fts_score", 0.0))
-        + 0.18 * seed_component
-        + 0.15 * preference_component
-        + 0.12 * history_component
-        + 0.10 * appeal_component
+        0.62 * semantic_component
+        + 0.16 * fts_component
+        + 0.10 * keyword_component
+        + 0.08 * quality_component
+        + 0.12 * seed_component
+        + 0.10 * genre_reward
+        - 0.18 * avoid_component
+        - 0.10 * genre_penalty
         - 0.05 * novelty_component
-        - 0.08 * preference_penalty
     )
 
 
@@ -782,38 +727,28 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
     if int(row["tmdb_id"]) in retrieval_profile.get("exclude_seed_tmdb_ids", set()):
         return -10_000.0
 
-    query_terms = retrieval_profile["positive_query_tokens"] or retrieval_profile["raw_preference_tokens"]
-    overlap = len(query_terms.intersection(row["search_blob_tokens"]))
-    negative_hits = len(retrieval_profile["negative_tokens"].intersection(row["search_blob_tokens"]))
-    alignment_score = preference_alignment_score(row, retrieval_profile)
-
     return (
-        float(overlap)
-        + 0.9 * alignment_score
+        2.5 * keyword_alignment_score(row, retrieval_profile)
         + 0.9 * seed_similarity_score(row, retrieval_profile)
-        + 0.8 * history_affinity_score(row, retrieval_profile)
-        + 0.4 * appeal_score(row)
-        - 2.1 * negative_hits
-        - novelty_penalty(row, retrieval_profile)
+        + 0.8 * quality_prior_score(row)
+        + 0.6 * max(0.0, genre_alignment_score(row, retrieval_profile))
+        - 1.8 * avoid_penalty_score(row, retrieval_profile)
+        - _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     )
 
 
 def diversify_candidates(candidates: pd.DataFrame, limit: int) -> pd.DataFrame:
     selected: list[tuple[float, int]] = []
     selected_roots: set[str] = set()
-    selected_directors: set[str] = set()
 
     for row in candidates.itertuples():
         diversity_penalty = 0.0
         if row.title_root and row.title_root in selected_roots:
             diversity_penalty += 0.25
-        if row.director_set and row.director_set.intersection(selected_directors):
-            diversity_penalty += 0.1
         adjusted_score = float(row.second_stage_score) - diversity_penalty
         if len(selected) < limit:
             selected.append((adjusted_score, row.Index))
             selected_roots.add(row.title_root)
-            selected_directors.update(row.director_set)
 
     if not selected:
         return candidates.head(limit)
@@ -871,10 +806,8 @@ def build_candidate_pool(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
-    query_hints: tuple[str, ...] = (),
-    avoid_hints: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, dict[str, Any], str]:
-    retrieval_profile = build_retrieval_profile(preferences, history, query_hints=query_hints, avoid_hints=avoid_hints)
+    retrieval_profile = build_retrieval_profile(preferences, history)
     lexical_query_text = build_query_text(preferences, retrieval_profile)
     semantic_query_text = retrieval_profile["semantic_query_text"]
     exclude_ids = set(retrieval_profile["history_tmdb_ids"])
@@ -902,16 +835,8 @@ def build_shortlist(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
-    query_hints: tuple[str, ...] = (),
-    avoid_hints: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    candidates, retrieval_profile, resolved_mode = build_candidate_pool(
-        preferences,
-        history,
-        mode=mode,
-        query_hints=query_hints,
-        avoid_hints=avoid_hints,
-    )
+    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode)
     prompt_profile = build_prompt_profile(preferences, retrieval_profile)
 
     reranked = candidates.head(SECOND_STAGE_POOL_SIZE).copy()
