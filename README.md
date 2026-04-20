@@ -173,13 +173,21 @@ The project is deployable to Leapcell as-is.
 
 The current `leapcell.yaml`:
 
-- installs dependencies
-- warms the sentence-transformer model during build
+- installs a lean runtime dependency set from `requirements-leapcell.txt`
+- does **not** download or warm the sentence-transformer model during image build
 - starts the API with:
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8080
+python -m uvicorn main:app --host 0.0.0.0 --port 8080
 ```
+
+Why this matters:
+
+- Leapcell image builds are resource-constrained.
+- Installing `sentence-transformers` pulls in a much heavier stack and warming the model during build can exceed Leapcell limits.
+- The deployed app can still run without that package: semantic retrieval will simply stay unavailable on Leapcell, and the runtime will fall back to lexical / metadata retrieval plus the final LLM choice.
+
+Keep using the full `requirements.txt` for local development and offline artifact generation. The lightweight `requirements-leapcell.txt` exists only for hosted deployment.
 
 After deployment, test:
 
