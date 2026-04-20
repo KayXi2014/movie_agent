@@ -214,6 +214,26 @@ def _needs_enrichment(row: pd.Series) -> bool:
     return str(row.get(ENRICHMENT_STATUS_COLUMN, "") or "").strip() != ENRICHMENT_VERSION
 
 
+def enrichment_status_summary(source_path: Path = TARGET_PATH, *, top_n: int | None = None) -> dict[str, Any]:
+    if source_path.exists():
+        df = pd.read_csv(source_path).fillna("")
+    elif SOURCE_PATH.exists():
+        df = pd.read_csv(SOURCE_PATH).fillna("")
+    else:
+        return {"rows_total": 0, "rows_in_scope": 0, "rows_current": 0, "rows_needing_enrichment": 0}
+
+    enriched = _ensure_enrichment_columns(df)
+    scoped = enriched if top_n is None else enriched.head(min(int(top_n), len(enriched)))
+    rows_needing_enrichment = int(sum(_needs_enrichment(row) for _, row in scoped.iterrows()))
+    rows_current = int(len(scoped) - rows_needing_enrichment)
+    return {
+        "rows_total": int(len(enriched)),
+        "rows_in_scope": int(len(scoped)),
+        "rows_current": rows_current,
+        "rows_needing_enrichment": rows_needing_enrichment,
+    }
+
+
 def _merge_row_with_related_metadata(row: pd.Series, detail: dict[str, Any]) -> pd.Series:
     parsed = _parse_related_metadata(detail)
     updated = row.copy()

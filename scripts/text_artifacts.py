@@ -14,11 +14,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from retrieval import (
-    ACTIVE_DATA_PATH,
+    DATA_PATH,
     DEFAULT_EMBEDDING_MODEL,
     EMBEDDING_IDS_PATH,
     EMBEDDING_META_PATH,
     EMBEDDINGS_PATH,
+    ENRICHED_DATA_PATH,
     RETRIEVAL_DB_META_PATH,
     RETRIEVAL_DB_PATH,
     dataset_fingerprint,
@@ -34,6 +35,10 @@ FTS_TEXT_COLUMNS = [
     "alternative_titles",
     "genres",
     "keywords",
+    "keywords_augmented",
+    "tone_tags",
+    "audience_tags",
+    "source_tags",
     "director",
     "top_cast",
     "collection_name",
@@ -45,24 +50,81 @@ FTS_TEXT_COLUMNS = [
 ]
 
 EMBEDDING_TEXT_FIELDS = [
+    ("Essence", "essence"),
+    ("Tone Tags", "tone_tags_text"),
+    ("Audience Tags", "audience_tags_text"),
+    ("Source Tags", "source_tags_text"),
+    ("Keywords", "keywords"),
+    ("Keywords Augmented", "keywords_augmented_text"),
+    ("Genres", "genres"),
     ("Overview", "overview"),
     ("Tagline", "tagline"),
 ]
 
 
+def _normalized_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _parse_text_list(value: object) -> list[str]:
+    raw = _normalized_text(value)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(parsed, list):
+        return []
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        text = _normalized_text(item)
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            unique.append(text)
+    return unique
+
+
+def _list_text(value: object) -> str:
+    return ", ".join(_parse_text_list(value))
+
+
+def _prepare_text_artifact_columns(rows: pd.DataFrame) -> pd.DataFrame:
+    prepared = rows.copy()
+    def _column_or_empty(name: str) -> pd.Series:
+        if name in prepared.columns:
+            return prepared[name]
+        return pd.Series([""] * len(prepared), index=prepared.index, dtype="object")
+
+    prepared["keywords_augmented_text"] = _column_or_empty("keywords_augmented_json").map(_list_text)
+    prepared["tone_tags_text"] = _column_or_empty("tone_tags_json").map(_list_text)
+    prepared["audience_tags_text"] = _column_or_empty("audience_tags_json").map(_list_text)
+    prepared["source_tags_text"] = _column_or_empty("source_tags_json").map(_list_text)
+    return prepared
+
+
+def _active_data_path() -> Path:
+    return ENRICHED_DATA_PATH if ENRICHED_DATA_PATH.exists() else DATA_PATH
+
+
 def build_movie_embedding_text(row: dict[str, object]) -> str:
     parts: list[str] = []
     for label, key in EMBEDDING_TEXT_FIELDS:
-        value = str(row.get(key, "")).strip()
+        value = _normalized_text(row.get(key, ""))
         if value:
             parts.append(f"{label}: {value}")
     if parts:
         return "\n".join(parts)
-    return str(row.get("title", "")).strip()
+    return _normalized_text(row.get("title", ""))
 
 
 def build_retrieval_index() -> None:
-    movies = ensure_dataset_columns(pd.read_csv(ACTIVE_DATA_PATH).fillna(""))
+    active_data_path = _active_data_path()
+    movies = ensure_dataset_columns(pd.read_csv(active_data_path).fillna(""))
+    movies = _prepare_text_artifact_columns(movies)
     if RETRIEVAL_DB_PATH.exists():
         RETRIEVAL_DB_PATH.unlink()
 
@@ -95,6 +157,10 @@ def build_retrieval_index() -> None:
                 alternative_titles,
                 genres,
                 keywords,
+                keywords_augmented,
+                tone_tags,
+                audience_tags,
+                source_tags,
                 director,
                 top_cast,
                 collection_name,
@@ -115,17 +181,17 @@ def build_retrieval_index() -> None:
             rows.append(
                 (
                     int(row.tmdb_id),
-                    str(row.title),
-                    str(row.original_title),
+                    _normalized_text(row.title),
+                    _normalized_text(row.original_title),
                     int(row.year),
-                    str(row.genres),
-                    str(row.overview),
-                    str(row.tagline),
-                    str(row.keywords),
-                    str(row.director),
-                    str(row.top_cast),
-                    str(row.original_language),
-                    str(row.production_countries),
+                    _normalized_text(row.genres),
+                    _normalized_text(row.overview),
+                    _normalized_text(row.tagline),
+                    _normalized_text(row.keywords),
+                    _normalized_text(row.director),
+                    _normalized_text(row.top_cast),
+                    _normalized_text(row.original_language),
+                    _normalized_text(row.production_countries),
                     float(row.vote_average),
                     int(row.vote_count),
                     title_root(row.title),
@@ -134,19 +200,23 @@ def build_retrieval_index() -> None:
             fts_rows.append(
                 (
                     int(row.tmdb_id),
-                    str(row.title),
-                    str(row.original_title),
-                    str(row.alternative_titles),
-                    str(row.genres),
-                    str(row.keywords),
-                    str(row.director),
-                    str(row.top_cast),
-                    str(row.collection_name),
-                    str(row.production_companies),
-                    str(row.original_language),
-                    str(row.production_countries),
-                    str(row.spoken_languages),
-                    str(row.us_rating),
+                    _normalized_text(row.title),
+                    _normalized_text(row.original_title),
+                    _normalized_text(row.alternative_titles),
+                    _normalized_text(row.genres),
+                    _normalized_text(row.keywords),
+                    _normalized_text(row.keywords_augmented_text),
+                    _normalized_text(row.tone_tags_text),
+                    _normalized_text(row.audience_tags_text),
+                    _normalized_text(row.source_tags_text),
+                    _normalized_text(row.director),
+                    _normalized_text(row.top_cast),
+                    _normalized_text(row.collection_name),
+                    _normalized_text(row.production_companies),
+                    _normalized_text(row.original_language),
+                    _normalized_text(row.production_countries),
+                    _normalized_text(row.spoken_languages),
+                    _normalized_text(row.us_rating),
                 )
             )
 
@@ -163,9 +233,10 @@ def build_retrieval_index() -> None:
         connection.executemany(
             """
             INSERT INTO movies_fts (
-                tmdb_id, title, original_title, alternative_titles, genres, keywords, director, top_cast,
-                collection_name, production_companies, original_language, production_countries, spoken_languages, us_rating
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tmdb_id, title, original_title, alternative_titles, genres, keywords, keywords_augmented,
+                tone_tags, audience_tags, source_tags, director, top_cast, collection_name,
+                production_companies, original_language, production_countries, spoken_languages, us_rating
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             fts_rows,
         )
@@ -176,7 +247,7 @@ def build_retrieval_index() -> None:
     write_json(
         RETRIEVAL_DB_META_PATH,
         {
-            **dataset_fingerprint(ACTIVE_DATA_PATH),
+            **dataset_fingerprint(active_data_path),
             "artifact_type": "sqlite_fts",
             "row_count": int(len(movies)),
         },
@@ -186,7 +257,9 @@ def build_retrieval_index() -> None:
 def build_movie_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
     from sentence_transformers import SentenceTransformer
 
-    movies = ensure_dataset_columns(pd.read_csv(ACTIVE_DATA_PATH).fillna(""))
+    active_data_path = _active_data_path()
+    movies = ensure_dataset_columns(pd.read_csv(active_data_path).fillna(""))
+    movies = _prepare_text_artifact_columns(movies)
     documents = [build_movie_embedding_text(row._asdict()) for row in movies.itertuples(index=False)]
     model = SentenceTransformer(model_name)
     embeddings = model.encode(documents, normalize_embeddings=True, batch_size=64, show_progress_bar=True)
@@ -197,7 +270,7 @@ def build_movie_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
     write_json(
         EMBEDDING_META_PATH,
         {
-            **dataset_fingerprint(ACTIVE_DATA_PATH),
+            **dataset_fingerprint(active_data_path),
             "artifact_type": "semantic_embeddings",
             "embedding_model": model_name,
             "embedding_dim": int(embeddings.shape[1]),

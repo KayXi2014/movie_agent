@@ -167,6 +167,14 @@ def _build_selection_prompt(
         if genres:
             parts.append(f"genres: {genres}")
 
+        director = _trim_text(movie.get("director"), 48)
+        if director:
+            parts.append(f"director: {director}")
+
+        cast = _csv_head(movie.get("top_cast"), 2)
+        if cast:
+            parts.append(f"cast: {cast}")
+
         keywords = _csv_head(movie.get("keywords"), 3)
         if keywords:
             parts.append(f"keywords: {keywords}")
@@ -195,6 +203,7 @@ def _build_selection_prompt(
             "- Do not retrieve or invent a different movie.",
             "- Use the user's request as the source of constraints and preferences.",
             "- Judge each movie only by the dataset-backed candidate details shown below.",
+            "- If the user references a director or actor, treat matching director/cast details as an important clue.",
             "- If a year is shown, use it only when the request cares about recency or era.",
             "- Do not introduce qualities that are not supported by the request or the candidate details.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
@@ -256,6 +265,8 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool =
             "title": str(row["title"]),
             "genres": str(row["genres"]),
             "overview": str(row["overview"])[:220],
+            "director": str(row.get("director", "")),
+            "top_cast": str(row.get("top_cast", "")),
             "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
             "production_countries": str(row.get("production_countries", "")),
         }

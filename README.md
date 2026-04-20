@@ -11,7 +11,7 @@ agentic-movie-recommender/
   retrieval.py
   fts_retrieval.py
   semantic_retrieval.py
-  scripts/    # local prep, enrichment, and benchmarking commands
+  scripts/    # local prep, TMDB enrichment, LLM augmentation, and benchmarking commands
   data/       # dataset, retrieval artifacts, eval cases, benchmark outputs
   ui/         # local Streamlit debug UI
 ```
@@ -25,7 +25,7 @@ agentic-movie-recommender/
    - a simplified semantic-first rerank with explicit genre/avoid filtering
    - light diversification
 3. `retrieval.py` returns:
-   - a shortlist of up to 15 candidates
+   - a shortlist of up to 12 candidates
    - a lean prompt profile with only:
      - `target_genres`
      - `tone` (when the request clearly expresses one)
@@ -48,6 +48,7 @@ pip install -r requirements.txt
 Environment variables:
 
 - `OLLAMA_API_KEY` required for the final recommendation LLM call
+- `OLLAMA_API_KEY` also powers offline LLM augmentation
 - `TMDB_API_KEY` optional for rebuilding the enriched dataset locally
 
 Set the required key in the same shell before running the API:
@@ -58,9 +59,16 @@ export OLLAMA_API_KEY=your_ollama_api_key_here
 
 ## Running Locally
 
-### 1. Prepare retrieval artifacts if needed
+### 1. Prepare local data/artifacts if needed
 
-This repo already includes the generated retrieval artifacts under `data/`, so this step is only required if you want to rebuild them.
+This repo already includes the generated retrieval artifacts under `data/`, so this step is **not part of normal day-to-day usage**. In the common case, you can install dependencies and start `uvicorn` immediately.
+
+Run local preparation only when you explicitly want to:
+
+- rebuild SQLite / embedding artifacts
+- refresh TMDB-enriched metadata
+- refresh offline LLM augmentation fields
+- recover from stale or mismatched artifact metadata
 
 ```bash
 python -m scripts.prepare_local_runtime
@@ -68,15 +76,42 @@ python -m scripts.prepare_local_runtime
 
 What it does:
 
-- optionally rebuilds `data/tmdb_top1000_movies_enriched.csv` if TMDB credentials are set
-- rebuilds the retrieval database and text-embedding artifacts used by semantic retrieval:
+- checks whether TMDB enrichment is stale, and only refreshes it if TMDB credentials are set and rows still need enrichment
+- checks whether LLM augmentation is stale, and only refreshes it if `OLLAMA_API_KEY` is set and rows still need augmentation
+- rebuilds the retrieval database and text-embedding artifacts only when the dataset changed or the artifact metadata is stale:
   - `data/movies.sqlite`
   - `data/movies.sqlite.meta.json`
   - `data/movie_embeddings.npy`
   - `data/movie_embedding_ids.json`
   - `data/movie_embedding_meta.json`
 
-You do not need to run `scripts.text_artifacts` separately unless you specifically want those lower-level maintenance commands.
+By default, `prepare_local_runtime` is idempotent: it skips TMDB enrichment, LLM augmentation, and artifact rebuilds if they are already current.
+
+Useful variants:
+
+```bash
+python -m scripts.prepare_local_runtime --skip-tmdb
+python -m scripts.prepare_local_runtime --skip-augmentation
+python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
+python -m scripts.prepare_local_runtime --refresh-augmentation
+python -m scripts.prepare_local_runtime --skip-artifacts
+python -m scripts.prepare_local_runtime --augment-workers 2
+python -m scripts.prepare_local_runtime --augment-model gemma4:31b-cloud
+```
+
+Recommended usage patterns:
+
+- normal local API work: do **not** run `prepare_local_runtime`
+- only rebuild retrieval artifacts from the current CSV:
+  ```bash
+  python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
+  ```
+- refresh augmentation but avoid touching TMDB enrichment:
+  ```bash
+  python -m scripts.prepare_local_runtime --skip-tmdb --refresh-augmentation
+  ```
+
+You do not need to run `scripts.text_artifacts` separately unless you specifically want those lower-level maintenance commands, and you do not need to rerun `scripts.llm_augment` for already-complete rows because the augmentation script resumes only missing fields.
 
 If you want TMDB enrichment in that step:
 
@@ -212,19 +247,77 @@ The benchmark keeps the existing scoring emphasis:
 - description and recommendation quality proxies
 - total runtime
 
+## Offline Augmentation
+
+The local prep pipeline now has three layers:
+
+1. TMDB enrichment for factual metadata such as collection info, related titles, alternative titles, spoken languages, and ratings
+2. LLM augmentation for semantic fields such as:
+   - `essence`
+   - `tone_tags_json`
+   - `audience_tags_json`
+   - `source_tags_json`
+   - `keywords_augmented_json`
+3. Retrieval artifact rebuilds for:
+   - SQLite FTS
+   - sentence-transformer embeddings
+
+The deployed API does not run any of these offline steps at request time.
+
+The offline augmenter uses Ollama cloud directly. The current default model is `gemma4:31b-cloud`. You can override the model with `--model` or `AUGMENT_MODEL`.
+
+### Run augmentation directly
+
+```bash
+export OLLAMA_API_KEY=your_ollama_api_key_here
+python -m scripts.llm_augment
+```
+
+The augmentation job is resumable:
+
+- rerunning it only sends rows with missing augmentation fields back to the LLM
+- already-complete rows are skipped
+- progress is saved batch by batch to `data/tmdb_top1000_movies_enriched.csv`
+
+Important operational warning:
+
+- this step can take a long time on the full 1000-movie dataset
+- Ollama cloud may return `429 too many concurrent requests` or read timeouts even at low concurrency
+- a completed-looking run may still leave some rows missing until a rerun finishes them
+- this step is offline-only and should not be run on normal API startup or deployment
+
+If you hit Ollama rate limits or timeouts, keep the worker count low and rerun:
+
+```bash
+python -m scripts.llm_augment --workers 1
+```
+
+If you want to avoid rerunning other prep layers while finishing augmentation, use:
+
+```bash
+python -m scripts.prepare_local_runtime --skip-tmdb --refresh-augmentation --augment-workers 1
+```
+
+If the augmentation eventually completes and you want the retrieval stack to use the new fields, rebuild artifacts afterward:
+
+```bash
+python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
+```
+
 ## Offline Scripts
 
 Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` already covers the normal end-to-end local prep flow, including rebuilding the text embeddings.
 
 ```bash
 python -m scripts.tmdb_enrichment
+python -m scripts.llm_augment
 python -m scripts.text_artifacts --target index
 python -m scripts.text_artifacts --target embeddings
 python -m scripts.prepare_local_runtime
 python -m scripts.benchmark_recommender
 ```
 
-`scripts/tmdb_enrichment.py` and `scripts/text_artifacts.py` are offline-only and are not used by the deployed API.
+`scripts/tmdb_enrichment.py`, `scripts/llm_augment.py`, and `scripts/text_artifacts.py` are offline-only and are not used by the deployed API.
 
 ## Notes
 
@@ -232,3 +325,5 @@ python -m scripts.benchmark_recommender
 - The Streamlit app is for local inspection only; it is not part of the production deployment.
 - Watch history is used primarily for exclusion and anti-repeat behavior, not as guaranteed taste evidence.
 - Retrieval no longer uses a separate pre-retrieval LLM step; the only live model call in the request path is the final recommendation-selection call.
+- `scripts.prepare_local_runtime` is a maintenance command, not a normal startup step.
+- Offline LLM augmentation is the slowest and least reliable prep layer; expect long runtimes and occasional provider errors, and rely on resumable reruns rather than assuming one pass will always finish cleanly.

@@ -382,6 +382,18 @@ MOVIES = prepare_movies(TOP_MOVIES)
 MOVIES_BY_EXACT_TITLE = MOVIES.groupby("title", sort=False)
 MOVIES_BY_TMDB_ID = MOVIES.set_index("tmdb_id", drop=False)
 MOVIES_BY_TITLE_VARIANT: dict[str, tuple[int, ...]] = {}
+KNOWN_PERSON_NAMES = tuple(
+    sorted(
+        {
+            name
+            for row in MOVIES.itertuples()
+            for name in (*row.director_set, *row.cast_set)
+            if len(tokenize(name)) >= 2
+        },
+        key=len,
+        reverse=True,
+    )
+)
 for row in MOVIES.itertuples():
     tmdb_id = int(row.tmdb_id)
     for variant in row.title_variants:
@@ -481,19 +493,17 @@ def history_rows(history: tuple[tuple[int | None, str], ...]) -> pd.DataFrame:
     rows = []
     seen_ids: set[int] = set()
     for tmdb_id, name in history:
-        if tmdb_id is not None and tmdb_id in MOVIES_BY_TMDB_ID.index:
-            row = MOVIES_BY_TMDB_ID.loc[tmdb_id]
-            if int(row.tmdb_id) not in seen_ids:
-                rows.append(row.to_frame().T)
-                seen_ids.add(int(row.tmdb_id))
-            continue
+        matched_by_name = False
         if name in MOVIES_BY_EXACT_TITLE.groups:
             group = MOVIES_BY_EXACT_TITLE.get_group(name)
             unseen = group[~group["tmdb_id"].isin(seen_ids)]
             if not unseen.empty:
                 rows.append(unseen)
                 seen_ids.update(unseen["tmdb_id"].astype(int).tolist())
-                continue
+                matched_by_name = True
+        if matched_by_name:
+            continue
+
         normalized_name = normalize_text(name)
         if normalized_name in MOVIES_BY_TITLE_VARIANT:
             matched_ids = [candidate_id for candidate_id in MOVIES_BY_TITLE_VARIANT[normalized_name] if candidate_id not in seen_ids]
@@ -501,6 +511,15 @@ def history_rows(history: tuple[tuple[int | None, str], ...]) -> pd.DataFrame:
                 unseen = MOVIES[MOVIES["tmdb_id"].isin(matched_ids)]
                 rows.append(unseen)
                 seen_ids.update(unseen["tmdb_id"].astype(int).tolist())
+                matched_by_name = True
+        if matched_by_name:
+            continue
+
+        if tmdb_id is not None and tmdb_id in MOVIES_BY_TMDB_ID.index:
+            row = MOVIES_BY_TMDB_ID.loc[tmdb_id]
+            if int(row.tmdb_id) not in seen_ids:
+                rows.append(row.to_frame().T)
+                seen_ids.add(int(row.tmdb_id))
     if not rows:
         return MOVIES.iloc[0:0].copy()
     return pd.concat(rows, ignore_index=True).drop_duplicates(subset=["tmdb_id"])
@@ -523,15 +542,32 @@ def history_prompt_text(history_count: int) -> str:
     return "none" if history_count <= 0 else f"known_watch_history_count={history_count}; use history primarily to avoid re-recommending already watched titles"
 
 
+def _phrase_mentioned(text: str, phrase: str) -> bool:
+    if not text or not phrase:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text))
+
+
+def extract_named_person_signals(preferences: str) -> list[str]:
+    normalized = normalize_text(preferences)
+    matches: list[str] = []
+    for name in KNOWN_PERSON_NAMES:
+        if _phrase_mentioned(normalized, name):
+            matches.append(name)
+    return matches[:6]
+
+
 def build_retrieval_profile(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
 ) -> dict[str, Any]:
     history_df = history_rows(history)
+    normalized_preferences = normalize_text(preferences)
     raw_preference_tokens = tokenize(preferences)
     history_context = derive_history_context(history_df)
     negation_context = extract_negation_context(preferences)
     explicit_genre_targets = extract_explicit_genre_targets(preferences).difference(negation_context["hard_block_genres"])
+    named_person_signals = extract_named_person_signals(preferences)
     seed_df = preference_seed_rows(preferences, history_df)
     seed_signals = derive_seed_signals(seed_df)
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
@@ -556,8 +592,11 @@ def build_retrieval_profile(
         "history_exclusion_text": history_prompt_text(len(history)),
         "history_titles": {name for _, name in history if name},
         "history_tmdb_ids": {tmdb_id for tmdb_id, _ in history if tmdb_id is not None},
+        "normalized_preferences": normalized_preferences,
         "raw_preference_tokens": raw_preference_tokens,
         "explicit_genre_targets": explicit_genre_targets,
+        "named_person_signals": named_person_signals,
+        "has_named_person_signal": bool(named_person_signals),
         **negation_context,
         "negative_tokens": negative_tokens,
         "positive_query_tokens": positive_query_tokens,
@@ -643,6 +682,19 @@ def novelty_penalty(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     return penalty
 
 
+def person_anchor_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+    signals = retrieval_profile.get("named_person_signals", [])
+    if not signals:
+        return 0.0
+    director_matches = len(set(signals).intersection(row["director_set"]))
+    cast_matches = len(set(signals).intersection(row["cast_set"]))
+    if director_matches > 0:
+        return 1.0
+    if cast_matches > 0:
+        return 0.6
+    return 0.0
+
+
 def _normalize_component(value: float, maximum: float) -> float:
     if maximum <= 0:
         return 0.0
@@ -660,13 +712,23 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     seed_component = _normalize_component(seed_similarity_score(row, retrieval_profile), 8.0)
     avoid_component = avoid_penalty_score(row, retrieval_profile)
     novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
+    person_component = person_anchor_score(row, retrieval_profile)
+    if retrieval_profile.get("has_named_person_signal"):
+        semantic_weight = 0.48
+        fts_weight = 0.22
+        person_weight = 0.18
+    else:
+        semantic_weight = 0.62
+        fts_weight = 0.16
+        person_weight = 0.0
     return (
-        0.62 * semantic_component
-        + 0.16 * fts_component
+        semantic_weight * semantic_component
+        + fts_weight * fts_component
         + 0.10 * keyword_component
         + 0.08 * quality_component
         + 0.12 * seed_component
         + 0.10 * genre_reward
+        + person_weight * person_component
         - 0.18 * avoid_component
         - 0.10 * genre_penalty
         - 0.05 * novelty_component
@@ -733,6 +795,9 @@ def filter_semantic_only_candidates(candidates: pd.DataFrame, retrieval_profile:
         lambda tokens: bool(tokens.intersection(retrieval_profile["negative_match_tokens"]))
     )
     keep_mask.loc[semantic_only.index] &= ~avoid_hits
+
+    if retrieval_profile.get("has_named_person_signal"):
+        keep_mask.loc[semantic_only.index] &= semantic_only["semantic_score"] >= 0.72
 
     return candidates[keep_mask].copy()
 
@@ -824,6 +889,11 @@ def build_candidate_pool(
     retrieval_profile["lexical_hit_count"] = len(lexical_hits)
     retrieval_profile["semantic_hit_count"] = len(semantic_hits)
     retrieval_profile["semantic_active"] = bool(semantic_hits)
+    retrieval_profile["preserve_fts_tmdb_ids"] = [
+        int(hit["tmdb_id"])
+        for hit in lexical_hits[:3]
+        if retrieval_profile.get("has_named_person_signal")
+    ]
     return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile, resolved_mode
 
 
@@ -836,6 +906,10 @@ def build_shortlist(
     prompt_profile = build_prompt_profile(preferences, retrieval_profile)
 
     reranked = candidates.head(SECOND_STAGE_POOL_SIZE).copy()
+    preserve_fts_ids = retrieval_profile.get("preserve_fts_tmdb_ids", [])
+    if preserve_fts_ids:
+        preserved = candidates[candidates["tmdb_id"].isin(preserve_fts_ids)]
+        reranked = pd.concat([reranked, preserved], ignore_index=False).drop_duplicates(subset=["tmdb_id"], keep="first")
     reranked = reranked.sort_values(["second_stage_score", "semantic_score", "fts_score", "vote_average", "vote_count"], ascending=False)
     reranked = diversify_candidates(reranked, SHORTLIST_SIZE)
 
