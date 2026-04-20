@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-SHORTLIST_SIZE = 12
+SHORTLIST_SIZE = 10
 FTS_LIMIT = 40
 SEMANTIC_LIMIT = 40
 MERGED_POOL_SIZE = 60

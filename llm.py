@@ -142,6 +142,8 @@ def _build_selection_prompt(
     history_exclusion_text: str,
 ) -> str:
     history_hint = _build_history_exposure_hint(history_exclusion_text)
+    normalized_preferences = _normalize_text(preferences)
+    preference_tokens = set(_tokenize(preferences))
 
     def _trim_text(value: Any, limit: int) -> str:
         text = str(value or "").strip()
@@ -157,22 +159,44 @@ def _build_selection_prompt(
         items = [part.strip() for part in str(value or "").split(",") if part.strip()]
         return ", ".join(items[:limit])
 
+    def _query_mentions_any(items: list[str]) -> bool:
+        return any(_normalize_text(item) in normalized_preferences for item in items if item)
+
+    include_director = "director" in preference_tokens or "filmmaker" in preference_tokens
+    include_cast = bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
+    include_country = bool(
+        {"foreign", "international", "country", "countries", "language", "languages", "korean", "japanese", "french", "spanish", "italian", "german", "british", "english"} & preference_tokens
+    )
+
+    if not include_director:
+        include_director = _query_mentions_any([movie.get("director", "") for movie in shortlist])
+    if not include_cast:
+        cast_names: list[str] = []
+        for movie in shortlist:
+            cast_names.extend(part.strip() for part in str(movie.get("top_cast", "")).split(",") if part.strip())
+        include_cast = _query_mentions_any(cast_names)
+    if not include_country:
+        countries: list[str] = []
+        for movie in shortlist:
+            countries.extend(part.strip() for part in str(movie.get("production_countries", "")).split(",") if part.strip())
+        include_country = _query_mentions_any(countries)
+
     def _fmt(movie: dict[str, Any]) -> str:
         title = movie["title"]
         if movie.get("year"):
             title = f'{title} ({movie["year"]})'
         parts = [f'{movie["tmdb_id"]} | {title}']
 
-        genres = _csv_head(movie["genres"], 3)
+        genres = _csv_head(movie["genres"], 2)
         if genres:
             parts.append(f"genres: {genres}")
 
-        director = _trim_text(movie.get("director"), 48)
-        if director:
+        director = _trim_text(movie.get("director"), 40)
+        if include_director and director:
             parts.append(f"director: {director}")
 
-        cast = _csv_head(movie.get("top_cast"), 2)
-        if cast:
+        cast = _csv_head(movie.get("top_cast"), 1)
+        if include_cast and cast:
             parts.append(f"cast: {cast}")
 
         keywords = _csv_head(movie.get("keywords"), 3)
@@ -180,10 +204,10 @@ def _build_selection_prompt(
             parts.append(f"keywords: {keywords}")
 
         country = _csv_head(movie.get("production_countries"), 2)
-        if country:
+        if include_country and country:
             parts.append(f"country: {country}")
 
-        premise = _trim_text(movie.get("overview"), 72) or "clear premise"
+        premise = _trim_text(movie.get("overview"), 56) or "clear premise"
         parts.append(f"premise: {premise}")
 
         return " | ".join(parts)
@@ -221,20 +245,58 @@ def _build_selection_prompt(
 
 
 def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any]) -> str:
-    keywords = [part.strip() for part in str(movie.get("keywords") or "").split(",") if part.strip()]
-    lead_keywords = ", ".join(keywords[:4])
-    if lead_keywords:
-        hook = f'{movie["title"]} throws you into {lead_keywords}, with a premise that feels concrete right away.'
+    raw_keywords = [part.strip() for part in str(movie.get("keywords") or "").split(",") if part.strip()]
+    keywords = [kw for kw in raw_keywords if "based on" not in kw.lower()]
+    if not keywords:
+        keywords = raw_keywords
+    overview = str(movie.get("overview") or "").strip()
+
+    def _trim_sentence(text: str, limit: int = 180) -> str:
+        trimmed = text[:limit].rstrip()
+        if trimmed.endswith((".", "!", "?")):
+            return trimmed.rstrip(" ,.;:") + "."
+        abbreviations = ("Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.")
+        sentence_break = -1
+        for marker in (". ", "! ", "? "):
+            search_from = 0
+            while True:
+                idx = trimmed.find(marker, search_from)
+                if idx == -1:
+                    break
+                prefix = trimmed[max(0, idx - 5) : idx + 1]
+                if not prefix.endswith(abbreviations):
+                    sentence_break = idx
+                search_from = idx + 1
+        if sentence_break > 40:
+            trimmed = trimmed[: sentence_break + 1]
+            return trimmed.rstrip(" ,.;:") + "."
+        last_space = trimmed.rfind(" ")
+        if len(text) > limit and last_space > max(20, limit // 2):
+            trimmed = trimmed[:last_space]
+        return trimmed.rstrip(" ,.;:") + "."
+
+    def _natural_list(items: list[str]) -> str:
+        cleaned = [item.strip() for item in items if item.strip()]
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return cleaned[0]
+        if len(cleaned) == 2:
+            return f"{cleaned[0]} and {cleaned[1]}"
+        return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+    if overview:
+        hook = _trim_sentence(overview)
+    elif keywords:
+        lead_keywords = _natural_list(keywords[:3])
+        hook = f'{movie["title"]} leans into {lead_keywords} with a setup that is easy to picture right away.'
     else:
-        overview = str(movie["overview"]).strip()
-        if overview:
-            trimmed = overview[:180]
-            last_space = trimmed.rfind(" ")
-            if len(overview) > 180 and last_space > 100:
-                trimmed = trimmed[:last_space]
-            hook = trimmed.rstrip(".") + "."
-        else:
-            hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
+        hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
+
+    support_line = ""
+    if keywords:
+        lead_keywords = _natural_list(keywords[:3])
+        support_line = f"It leans into {lead_keywords}, which helps give it a more specific identity than a generic fallback pick."
 
     tones = prompt_profile.get("tone", [])
     if tones:
@@ -248,7 +310,11 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
     else:
         fit_line = "If you want something engaging without overthinking it, this gives you a clearer hook than a generic effects-first pick."
 
-    return f"{hook} {fit_line}"[:500]
+    parts = [hook]
+    if support_line:
+        parts.append(support_line)
+    parts.append(fit_line)
+    return " ".join(parts)[:500]
 
 
 def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool = False) -> list[dict[str, Any]]:
@@ -287,7 +353,7 @@ def _choose_with_llm(
     shortlist: list[dict[str, Any]],
     history_exclusion_text: str,
     timeout_seconds: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     prompt = _build_selection_prompt(preferences, shortlist, history_exclusion_text)
     response = _get_client(timeout_seconds).chat(
         model=MODEL,
@@ -300,10 +366,11 @@ def _choose_with_llm(
 
     tmdb_id = _resolve_selected_tmdb_id(selection_payload, shortlist)
 
-    return {
+    result = {
         "tmdb_id": tmdb_id,
         "description": str(selection_payload.get("description", ""))[:500],
     }
+    return result, len(prompt)
 
 
 def _remaining_llm_timeout_seconds(started_at: float) -> float:
@@ -316,21 +383,32 @@ def _remaining_llm_timeout_seconds(started_at: float) -> float:
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
     started_at = time.perf_counter()
     shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
+    retrieval_elapsed = time.perf_counter() - started_at
     shortlist = _enrich_shortlist(shortlist_refs, include_year=bool(prompt_profile.get("year_relevant")))
     if not shortlist:
         raise ValueError("No candidate movies available")
 
+    prompt_chars = 0
+    llm_elapsed = 0.0
     try:
         llm_timeout_seconds = _remaining_llm_timeout_seconds(started_at)
         if llm_timeout_seconds <= 0.5:
             raise TimeoutError("Not enough request budget left for LLM selection")
-        result = _choose_with_llm(
+        llm_started = time.perf_counter()
+        result, prompt_chars = _choose_with_llm(
             preferences,
             shortlist,
             retrieval_profile["history_exclusion_text"],
             timeout_seconds=llm_timeout_seconds,
         )
+        llm_elapsed = time.perf_counter() - llm_started
         result["used_llm"] = True
+        logger.info(
+            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s",
+            retrieval_elapsed,
+            llm_elapsed,
+            False,
+        )
         return result
     except Exception as exc:
         logger.warning(
@@ -339,6 +417,21 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
             len(history),
             len(shortlist),
             exc,
+        )
+        llm_elapsed = max(0.0, time.perf_counter() - started_at - retrieval_elapsed)
+        if not prompt_chars:
+            prompt_chars = len(
+                _build_selection_prompt(
+                    preferences,
+                    shortlist,
+                    retrieval_profile["history_exclusion_text"],
+                )
+            )
+        logger.info(
+            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s",
+            retrieval_elapsed,
+            llm_elapsed,
+            True,
         )
         best = shortlist[0]
         return {
