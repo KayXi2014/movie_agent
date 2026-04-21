@@ -6,3 +6,8 @@ memory: 1gb
 envs:
   - name: OLLAMA_API_KEY
     # Set this secret in the Leapcell dashboard — never commit the actual key
+  - name: HF_TOKEN
+    # Required for hosted Hugging Face query embeddings
+  - name: ENABLE_LLM_INTENT
+    value: "1"
+    # Set to "0" to disable the short intent LLM in production

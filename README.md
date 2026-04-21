@@ -1,6 +1,6 @@
 # Movie Recommender
 
-A FastAPI movie recommendation service built for a class competition. The project uses a local retrieval stack over a TMDB top-1000 dataset, then makes one final LLM call to choose the best movie and write a short recommendation blurb.
+A FastAPI movie recommendation service built for a class competition. The project uses a local retrieval stack over a TMDB top-1000 dataset, optionally asks a small LLM for compact intent hints, then routes the final LLM through an adaptive shortlist based on retrieval confidence.
 
 ## Project Layout
 
@@ -19,21 +19,29 @@ agentic-movie-recommender/
 ## Current Runtime Flow
 
 1. `POST /recommend` enters through `main.py`
-2. `retrieval.py` builds a broad local candidate pool using:
+2. By default, `llm.py` starts a short intent LLM call in parallel with local retrieval.
+   - The intent call only returns compact retrieval hints such as genres, avoid terms, tone, quality preference, country/language, release year, and story setting.
+   - If it times out or returns invalid JSON, it is ignored completely.
+   - Set `ENABLE_LLM_INTENT=0` to disable this stage.
+3. `retrieval.py` builds a broad local candidate pool using:
    - SQLite + FTS5 lexical retrieval
-   - precomputed embedding similarity
-   - a simplified semantic-first rerank with explicit genre/avoid filtering
+   - Hugging Face hosted query embeddings against local precomputed movie vectors
+   - literal local constraints such as title/history matches, exact genre aliases, avoid terms, known directors/cast, release-year ranges, and dataset-derived country/language terms
+   - optional LLM intent hints for fuzzy mood/style, quality preference, and ambiguous setting intent
+   - a hybrid rerank with genre, avoid, person, year, seed-title, rating/vote, FTS, and semantic components
    - light diversification
-3. `retrieval.py` returns:
-   - a shortlist of up to 12 candidates
-   - a lean prompt profile with only:
-     - `target_genres`
-     - `tone` (when the request clearly expresses one)
-     - `avoid`
-4. The final LLM sees the raw request, compact shortlist, avoid/watch-history hints, and returns:
+4. `retrieval.py` returns:
+   - a shortlist of up to 10 candidates
+   - a prompt profile with parsed request signals
+   - a confidence bundle with `confidence`, `route`, `convergence`, `top_fulfillment`, score gaps, and contradiction flags
+5. `llm.py` routes the final stage:
+   - high confidence: skip judging and ask the LLM to describe the top candidate only
+   - medium confidence: ask the LLM to judge the top 5
+   - low confidence: ask the LLM to judge the top 8
+6. The final LLM returns:
    - `tmdb_id`
    - a recommendation description capped at 500 characters
-5. If the final LLM fails, the app falls back to a deterministic local choice
+7. If the final LLM fails, the app falls back to a deterministic local choice
 
 ## Dependencies
 
@@ -51,11 +59,21 @@ Environment variables:
 - `OLLAMA_API_KEY` also powers offline LLM augmentation
 - `HF_TOKEN` required for Hugging Face hosted SentenceTransformer embeddings
 - `TMDB_API_KEY` optional for rebuilding the enriched dataset locally
+- `ENABLE_LLM_INTENT` optional; defaults to `1`, set to `0` to disable the short pre-retrieval intent LLM
+- `INTENT_LLM_TIMEOUT_S` optional; defaults to `4.0`
 
 Set the required key in the same shell before running the API:
 
 ```bash
 export OLLAMA_API_KEY=your_ollama_api_key_here
+export HF_TOKEN=your_huggingface_token_here
+```
+
+Optional intent routing controls:
+
+```bash
+export INTENT_LLM_TIMEOUT_S=4
+# export ENABLE_LLM_INTENT=0  # disable the intent LLM if needed
 ```
 
 ## Running Locally
@@ -147,7 +165,7 @@ curl -X POST http://127.0.0.1:8000/recommend \
 
 ### 4. Optional local UI
 
-The Streamlit app is a local debugging tool for sending API requests and inspecting the retrieval shortlist.
+The Streamlit app is a local debugging tool for sending API requests and inspecting retrieval confidence, adaptive routing, and the shortlist that would be sent to the final LLM.
 
 ```bash
 streamlit run ui/streamlit_ui.py
@@ -161,7 +179,7 @@ The project is deployable to Leapcell as-is.
 
 - root runtime files like `main.py`, `llm.py`, and `retrieval.py`
 - `data/` retrieval artifacts and dataset
-- root config files like `requirements.txt` and `leapcell.yaml`
+- root config files like `requirements-leapcell.txt` and `leapcell.yaml`
 
 ### Deploy steps
 
@@ -169,8 +187,9 @@ The project is deployable to Leapcell as-is.
 2. In Leapcell, create a new service from that GitHub repo.
 3. If needed, set the service root to this project directory.
 4. Let Leapcell use the root `leapcell.yaml`.
-5. Add the `OLLAMA_API_KEY` secret in Leapcell.
-6. Deploy.
+5. Add the `OLLAMA_API_KEY` and `HF_TOKEN` secrets in Leapcell.
+6. Optional: set `ENABLE_LLM_INTENT=0` if you want hosted requests to skip the short intent LLM stage.
+7. Deploy.
 
 The current `leapcell.yaml`:
 
@@ -187,6 +206,7 @@ Why this matters:
 - Leapcell image builds are resource-constrained.
 - Installing `sentence-transformers` pulls in a much heavier stack and warming the model during build can exceed Leapcell limits.
 - Semantic retrieval now uses Hugging Face hosted SentenceTransformer embeddings. It does not install `sentence-transformers`; query embeddings come from the HF feature-extraction API, while vector search stays local. If that embedding API is unavailable, semantic retrieval fails open and the runtime falls back to lexical / metadata retrieval plus the final LLM choice.
+- The intent LLM uses Ollama cloud and is controlled by `ENABLE_LLM_INTENT`, which defaults to enabled. If it misses its timeout, the request continues with local retrieval only.
 
 Keep using the full `requirements.txt` for local development and offline artifact generation. The lightweight `requirements-leapcell.txt` exists only for hosted deployment.
 
@@ -320,9 +340,7 @@ Semantic retrieval uses Hugging Face hosted SentenceTransformer embedding artifa
 ```bash
 export HF_TOKEN=your_huggingface_token_here
 python -m scripts.text_artifacts --check-embeddings
-python -m scripts.text_artifacts --target embeddings \
-  --embedding-model sentence-transformers/all-MiniLM-L6-v2 \
-  --embedding-dim 384
+python -m scripts.text_artifacts --target embeddings
 ```
 
 `HF_TOKEN` must be a Hugging Face token with permission to make Inference Providers calls. You can override the feature-extraction base URL for a dedicated HF endpoint with:
@@ -342,7 +360,6 @@ python -m scripts.tmdb_enrichment
 python -m scripts.llm_augment
 python -m scripts.text_artifacts --target index
 python -m scripts.text_artifacts --target embeddings
-python -m scripts.text_artifacts --target embeddings --embedding-model sentence-transformers/all-MiniLM-L6-v2 --embedding-dim 384
 python -m scripts.prepare_local_runtime
 python -m scripts.benchmark_recommender
 ```
@@ -354,6 +371,6 @@ python -m scripts.benchmark_recommender
 - The deployed API does not expose internal debug fields like `used_llm`.
 - The Streamlit app is for local inspection only; it is not part of the production deployment.
 - Watch history is used primarily for exclusion and anti-repeat behavior, not as guaranteed taste evidence.
-- Retrieval no longer uses a separate pre-retrieval LLM step; the only live model call in the request path is the final recommendation-selection call.
+- Retrieval uses a short pre-retrieval intent LLM by default; set `ENABLE_LLM_INTENT=0` if you want the only live model call in the request path to be the final recommendation-selection/description call.
 - `scripts.prepare_local_runtime` is a maintenance command, not a normal startup step.
 - Offline LLM augmentation is the slowest and least reliable prep layer; expect long runtimes and occasional provider errors, and rely on resumable reruns rather than assuming one pass will always finish cleanly.

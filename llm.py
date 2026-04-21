@@ -39,7 +39,7 @@ TOTAL_REQUEST_BUDGET_SECONDS = 20.0
 FALLBACK_BUFFER_SECONDS = 1.0
 LLM_TIMEOUT_SAFETY_MARGIN_SECONDS = 1.0
 MODEL = "gemma4:31b-cloud"
-ENABLE_LLM_INTENT = os.getenv("ENABLE_LLM_INTENT", "0") == "1"
+ENABLE_LLM_INTENT = os.getenv("ENABLE_LLM_INTENT", "1") == "1"
 INTENT_LLM_TIMEOUT_S = float(os.getenv("INTENT_LLM_TIMEOUT_S", "4.0"))
 logger = logging.getLogger(__name__)
 INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
