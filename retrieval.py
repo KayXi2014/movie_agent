@@ -610,6 +610,47 @@ def build_retrieval_profile(
     }
 
 
+def merge_intent_override(retrieval_profile: dict[str, Any], intent_override: dict[str, Any] | None) -> dict[str, Any]:
+    if not intent_override:
+        return retrieval_profile
+
+    merged = dict(retrieval_profile)
+
+    override_genres = {
+        GENRE_ALIASES.get(normalize_text(item), normalize_text(item))
+        for item in intent_override.get("genres", [])
+        if normalize_text(item)
+    }
+    override_genres = {genre for genre in override_genres if genre}
+    if override_genres:
+        merged["explicit_genre_targets"] = set(merged["explicit_genre_targets"]).union(override_genres).difference(merged["hard_block_genres"])
+        for genre in merged["explicit_genre_targets"]:
+            merged["positive_query_tokens"].update(tokenize(genre))
+
+    override_avoid = [" ".join(str(item or "").split()).strip() for item in intent_override.get("avoid", []) if str(item or "").strip()]
+    if override_avoid:
+        negative_phrases = list(merged["negative_phrases"])
+        for phrase in override_avoid:
+            normalized_phrase = normalize_text(phrase)
+            if normalized_phrase and normalized_phrase not in negative_phrases:
+                negative_phrases.append(normalized_phrase)
+                merged["negative_tokens"].update(tokenize(normalized_phrase))
+                merged["negative_match_tokens"].update(match_tokens(normalized_phrase))
+        merged["negative_phrases"] = negative_phrases[:6]
+
+    override_people = [normalize_text(item) for item in intent_override.get("named_people", []) if normalize_text(item)]
+    if override_people:
+        named_person_signals = list(merged.get("named_person_signals", []))
+        for person in override_people:
+            if person not in named_person_signals:
+                named_person_signals.append(person)
+        merged["named_person_signals"] = named_person_signals[:6]
+        merged["has_named_person_signal"] = bool(merged["named_person_signals"])
+
+    merged["lexical_query_text"] = " ".join(sorted(merged["positive_query_tokens"])) or merged["lexical_query_text"]
+    return merged
+
+
 def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_text(preferences)
     tone: list[str] = []
@@ -617,11 +658,185 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
         if pattern.search(normalized) and canonical not in tone:
             tone.append(canonical)
     year_relevant = bool(YEAR_SIGNAL_RE.search(normalized)) or any(phrase in normalized for phrase in YEAR_SIGNAL_PHRASES)
+    country_relevant_tokens = {
+        "foreign",
+        "international",
+        "country",
+        "countries",
+        "language",
+        "languages",
+        "korean",
+        "japanese",
+        "french",
+        "spanish",
+        "italian",
+        "german",
+        "british",
+        "english",
+    }
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
         "tone": tone[:3],
         "avoid": retrieval_profile["negative_phrases"][:6],
         "year_relevant": year_relevant,
+        "country_relevant": bool(set(tokenize(preferences)) & country_relevant_tokens),
+    }
+
+
+def _component_scores(row: pd.Series, retrieval_profile: dict[str, Any]) -> dict[str, float]:
+    return {
+        "keyword_alignment_score": round(keyword_alignment_score(row, retrieval_profile), 3),
+        "genre_alignment_score": round(genre_alignment_score(row, retrieval_profile), 3),
+        "avoid_penalty_score": round(avoid_penalty_score(row, retrieval_profile), 3),
+        "person_anchor_score": round(person_anchor_score(row, retrieval_profile), 3),
+        "seed_similarity_score": round(_normalize_component(seed_similarity_score(row, retrieval_profile), 8.0), 3),
+    }
+
+
+def build_confidence_bundle(
+    shortlist: list[dict[str, Any]],
+    retrieval_profile: dict[str, Any],
+    prompt_profile: dict[str, Any],
+) -> dict[str, Any]:
+    if not shortlist:
+        return {
+            "confidence": "low",
+            "route": "judge_10",
+            "specificity": "low",
+            "convergence": "weak",
+            "top_fulfillment": "low",
+            "intent_used": False,
+            "gap1": 0.0,
+            "gap5": 0.0,
+            "contradictions": ["empty_shortlist"],
+        }
+
+    top = shortlist[0]
+    second = shortlist[1] if len(shortlist) > 1 else None
+    fifth = shortlist[4] if len(shortlist) > 4 else None
+    gap1 = float(top["score"]) - float(second["score"]) if second else float(top["score"])
+    gap5 = float(top["score"]) - float(fifth["score"]) if fifth else gap1
+
+    specificity_points = 0
+    specificity_points += 1 if retrieval_profile["explicit_genre_targets"] else 0
+    specificity_points += 1 if retrieval_profile["negative_phrases"] else 0
+    specificity_points += 1 if retrieval_profile.get("named_person_signals") else 0
+    specificity_points += 1 if prompt_profile.get("year_relevant") else 0
+    specificity_points += 1 if retrieval_profile.get("similarity_request") else 0
+    if specificity_points >= 3:
+        specificity = "high"
+    elif specificity_points >= 2:
+        specificity = "medium"
+    else:
+        specificity = "low"
+
+    semantic_available = bool(retrieval_profile.get("semantic_available"))
+    lexical_available = bool(retrieval_profile.get("lexical_available"))
+    fts_present = float(top.get("fts_score", 0.0)) > 0.0
+    semantic_present = float(top.get("semantic_score", 0.0)) > 0.0
+    if semantic_available and fts_present and semantic_present:
+        convergence = "strong"
+    elif fts_present or semantic_present:
+        convergence = "partial"
+    else:
+        convergence = "weak"
+
+    contradictions: list[str] = []
+    if retrieval_profile["explicit_genre_targets"] and float(top.get("genre_alignment_score", 0.0)) <= 0.0:
+        contradictions.append("genre_miss")
+    if retrieval_profile["negative_phrases"] and float(top.get("avoid_penalty_score", 0.0)) > 0.1:
+        contradictions.append("avoid_hit")
+    if retrieval_profile.get("named_person_signals") and float(top.get("person_anchor_score", 0.0)) <= 0.0:
+        contradictions.append("person_miss")
+    if retrieval_profile.get("similarity_request") and float(top.get("seed_similarity_score", 0.0)) < 0.2:
+        contradictions.append("seed_miss")
+
+    keyword_score = float(top.get("keyword_alignment_score", 0.0))
+    genre_score = float(top.get("genre_alignment_score", 0.0))
+    avoid_score = float(top.get("avoid_penalty_score", 0.0))
+    person_score = float(top.get("person_anchor_score", 0.0))
+    seed_score = float(top.get("seed_similarity_score", 0.0))
+
+    high_match = keyword_score >= 0.3 and avoid_score <= 0.1
+    medium_match = keyword_score >= 0.16 and avoid_score <= 0.25
+    if retrieval_profile["explicit_genre_targets"]:
+        high_match = high_match and genre_score > 0.0
+        medium_match = medium_match and genre_score > -0.01
+    if retrieval_profile.get("named_person_signals"):
+        high_match = high_match and person_score > 0.0
+        medium_match = medium_match and person_score > 0.0
+    if retrieval_profile.get("similarity_request"):
+        high_match = high_match and seed_score >= 0.2
+        medium_match = medium_match and seed_score >= 0.1
+
+    if contradictions:
+        top_fulfillment = "low"
+    elif high_match:
+        top_fulfillment = "high"
+    elif medium_match:
+        top_fulfillment = "medium"
+    else:
+        top_fulfillment = "low"
+
+    lexical_only_equivalent = (
+        lexical_available
+        and not semantic_available
+        and fts_present
+        and keyword_score >= 0.3
+        and gap1 >= 0.08
+        and not contradictions
+    )
+
+    strong_convergence = convergence == "strong" or lexical_only_equivalent
+    very_strong_gap = gap1 >= 0.18 or gap5 >= 0.25
+    named_person_high_confidence = (
+        bool(retrieval_profile.get("named_person_signals"))
+        and person_score > 0.0
+        and strong_convergence
+        and very_strong_gap
+        and top_fulfillment in {"high", "medium"}
+        and not contradictions
+    )
+
+    if (
+        not contradictions
+        and strong_convergence
+        and (
+            (specificity == "high" and top_fulfillment == "high" and gap1 >= 0.03)
+            or (specificity == "medium" and top_fulfillment == "high" and gap1 >= 0.03)
+            or (specificity == "low" and top_fulfillment == "high" and very_strong_gap)
+            or named_person_high_confidence
+        )
+    ):
+        confidence = "high"
+        route = "description_only"
+    elif (
+        top_fulfillment in {"high", "medium"}
+        and not contradictions
+        and (
+            convergence in {"strong", "partial"}
+            or lexical_only_equivalent
+            or (convergence == "weak" and top_fulfillment == "high" and gap1 >= 0.05)
+        )
+    ):
+        confidence = "medium"
+        route = "judge_5"
+    else:
+        confidence = "low"
+        route = "judge_8"
+
+    return {
+        "confidence": confidence,
+        "route": route,
+        "specificity": specificity,
+        "convergence": convergence,
+        "top_fulfillment": top_fulfillment,
+        "gap1": round(gap1, 3),
+        "gap5": round(gap5, 3),
+        "contradictions": contradictions,
+        "semantic_available": semantic_available,
+        "lexical_available": lexical_available,
+        "top_candidate_tmdb_id": int(top["tmdb_id"]),
     }
 
 
@@ -746,6 +961,7 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
         + 0.9 * seed_similarity_score(row, retrieval_profile)
         + 0.8 * quality_prior_score(row)
         + 0.6 * max(0.0, genre_alignment_score(row, retrieval_profile))
+        + 0.8 * person_anchor_score(row, retrieval_profile)
         - 1.8 * avoid_penalty_score(row, retrieval_profile)
         - _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     )
@@ -851,8 +1067,10 @@ def build_candidate_pool(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
+    retrieval_profile_override: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any], str]:
     retrieval_profile = build_retrieval_profile(preferences, history)
+    retrieval_profile = merge_intent_override(retrieval_profile, retrieval_profile_override)
     lexical_query_text = build_query_text(preferences, retrieval_profile)
     semantic_query_text = retrieval_profile["semantic_query_text"]
     exclude_ids = set(retrieval_profile["history_tmdb_ids"])
@@ -860,9 +1078,11 @@ def build_candidate_pool(
     from fts_retrieval import fts_ready, search_fts
     from semantic_retrieval import search_semantic, semantic_ready
 
-    lexical_hits = search_fts(lexical_query_text, exclude_ids=exclude_ids, limit=FTS_LIMIT) if mode in {"hybrid", "lexical"} and fts_ready() else []
+    lexical_available = mode in {"hybrid", "lexical"} and fts_ready()
+    semantic_available = mode in {"hybrid", "semantic"} and semantic_ready()
+    lexical_hits = search_fts(lexical_query_text, exclude_ids=exclude_ids, limit=FTS_LIMIT) if lexical_available else []
     try:
-        semantic_hits = search_semantic(semantic_query_text, exclude_ids=exclude_ids, limit=SEMANTIC_LIMIT) if mode in {"hybrid", "semantic"} and semantic_ready() else []
+        semantic_hits = search_semantic(semantic_query_text, exclude_ids=exclude_ids, limit=SEMANTIC_LIMIT) if semantic_available else []
     except Exception:
         semantic_hits = []
 
@@ -889,6 +1109,8 @@ def build_candidate_pool(
     retrieval_profile["lexical_hit_count"] = len(lexical_hits)
     retrieval_profile["semantic_hit_count"] = len(semantic_hits)
     retrieval_profile["semantic_active"] = bool(semantic_hits)
+    retrieval_profile["lexical_available"] = bool(lexical_available)
+    retrieval_profile["semantic_available"] = bool(semantic_available)
     retrieval_profile["preserve_fts_tmdb_ids"] = [
         int(hit["tmdb_id"])
         for hit in lexical_hits[:3]
@@ -901,8 +1123,9 @@ def build_shortlist(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
     mode: str = "hybrid",
+    retrieval_profile_override: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode)
+    candidates, retrieval_profile, resolved_mode = build_candidate_pool(preferences, history, mode=mode, retrieval_profile_override=retrieval_profile_override)
     prompt_profile = build_prompt_profile(preferences, retrieval_profile)
 
     reranked = candidates.head(SECOND_STAGE_POOL_SIZE).copy()
@@ -918,6 +1141,7 @@ def build_shortlist(
 
     shortlist = []
     for row in reranked.head(SHORTLIST_SIZE).itertuples():
+        component_scores = _component_scores(MOVIES_BY_TMDB_ID.loc[int(row.tmdb_id)], retrieval_profile)
         shortlist.append(
             {
                 "tmdb_id": int(row.tmdb_id),
@@ -925,6 +1149,8 @@ def build_shortlist(
                 "score": round(float(row.second_stage_score), 3),
                 "semantic_score": round(float(getattr(row, "semantic_score", 0.0)), 3),
                 "fts_score": round(float(getattr(row, "fts_score", 0.0)), 3),
+                **component_scores,
             }
         )
+    retrieval_profile["confidence_bundle"] = build_confidence_bundle(shortlist, retrieval_profile, prompt_profile)
     return shortlist, prompt_profile, retrieval_profile

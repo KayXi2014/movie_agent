@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from functools import lru_cache
 from typing import Any
 
@@ -24,6 +25,7 @@ from retrieval import (
     build_prompt_profile as _build_prompt_profile,
     build_retrieval_profile as _build_retrieval_profile,
     build_shortlist as _build_shortlist,
+    GENRE_ALIASES,
     history_rows as _history_rows,
     normalize_history as _normalize_history,
     normalize_history_item as _normalize_history_item,
@@ -35,9 +37,13 @@ from retrieval import (
 
 TOTAL_REQUEST_BUDGET_SECONDS = 20.0
 FALLBACK_BUFFER_SECONDS = 1.0
-LLM_TIMEOUT_SAFETY_MARGIN_SECONDS = 0.25
+LLM_TIMEOUT_SAFETY_MARGIN_SECONDS = 1.0
 MODEL = "gemma4:31b-cloud"
+ENABLE_LLM_INTENT = os.getenv("ENABLE_LLM_INTENT", "0") == "1"
+INTENT_LLM_TIMEOUT_S = float(os.getenv("INTENT_LLM_TIMEOUT_S", "4.0"))
 logger = logging.getLogger(__name__)
+INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+KNOWN_GENRES = tuple(sorted({genre.strip() for value in TOP_MOVIES["genres"] for genre in str(value or "").split(",") if genre.strip()}))
 
 try:
     from semantic_retrieval import warm_semantic_runtime as _warm_semantic_runtime
@@ -58,6 +64,78 @@ def _get_client(timeout_seconds: float) -> ollama.Client:
         headers={"Authorization": f"Bearer {os.environ['OLLAMA_API_KEY']}"},
         timeout=timeout_seconds,
     )
+
+
+def _build_intent_prompt(preferences: str) -> str:
+    genres_text = ", ".join(KNOWN_GENRES)
+    return (
+        "Read the movie request and return only small retrieval hints as JSON.\n"
+        "Return JSON only.\n"
+        "Use these optional keys when helpful: "
+        '{"genres": ["..."], "avoid": ["..."], "named_people": ["..."]}\n'
+        f'Allowed genres: {genres_text}\n'
+        f"Request: {preferences}"
+    )
+
+
+def _intent_llm_options() -> dict[str, Any]:
+    return {
+        "temperature": 0.0,
+        "top_k": 10,
+        "top_p": 0.5,
+        "num_predict": 120,
+    }
+
+
+def _final_llm_options() -> dict[str, Any]:
+    return {
+        "temperature": 0.0,
+        "top_k": 10,
+        "top_p": 0.5,
+        "num_predict": 180,
+    }
+
+
+def _description_llm_options() -> dict[str, Any]:
+    return {
+        "temperature": 0.35,
+        "top_k": 20,
+        "top_p": 0.8,
+        "num_predict": 220,
+    }
+
+
+@lru_cache(maxsize=128)
+def _get_intent_override(preferences: str) -> dict[str, Any]:
+    api_key = os.getenv("OLLAMA_API_KEY", "").strip()
+    if not api_key or not ENABLE_LLM_INTENT:
+        return {}
+    try:
+        response = _get_client(INTENT_LLM_TIMEOUT_S).chat(
+            model=MODEL,
+            messages=[{"role": "user", "content": _build_intent_prompt(preferences)}],
+            format="json",
+            options=_intent_llm_options(),
+        )
+        payload = _extract_json_object(response.message.content)
+    except Exception:
+        return {}
+
+    genres = [
+        genre
+        for item in payload.get("genres", [])
+        if (genre := next((known for known in KNOWN_GENRES if _normalize_text(known) == _normalize_text(item)), None))
+    ]
+    avoid = [" ".join(str(item or "").split()).strip() for item in payload.get("avoid", []) if str(item or "").strip()]
+    named_people = [" ".join(str(item or "").split()).strip() for item in payload.get("named_people", []) if str(item or "").strip()]
+    result: dict[str, Any] = {}
+    if genres:
+        result["genres"] = genres[:3]
+    if avoid:
+        result["avoid"] = avoid[:3]
+    if named_people:
+        result["named_people"] = named_people[:3]
+    return result
 
 
 def _extract_json_object(text: Any) -> dict[str, Any]:
@@ -140,6 +218,9 @@ def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
     history_exclusion_text: str,
+    force_include_director: bool = False,
+    force_include_cast: bool = False,
+    force_include_country: bool = False,
 ) -> str:
     history_hint = _build_history_exposure_hint(history_exclusion_text)
     normalized_preferences = _normalize_text(preferences)
@@ -162,11 +243,9 @@ def _build_selection_prompt(
     def _query_mentions_any(items: list[str]) -> bool:
         return any(_normalize_text(item) in normalized_preferences for item in items if item)
 
-    include_director = "director" in preference_tokens or "filmmaker" in preference_tokens
-    include_cast = bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
-    include_country = bool(
-        {"foreign", "international", "country", "countries", "language", "languages", "korean", "japanese", "french", "spanish", "italian", "german", "british", "english"} & preference_tokens
-    )
+    include_director = force_include_director or "director" in preference_tokens or "filmmaker" in preference_tokens
+    include_cast = force_include_cast or bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
+    include_country = force_include_country
 
     if not include_director:
         include_director = _query_mentions_any([movie.get("director", "") for movie in shortlist])
@@ -242,6 +321,59 @@ def _build_selection_prompt(
         ]
     )
     return "\n".join(sections)
+
+
+def _build_description_only_prompt(
+    preferences: str,
+    movie: dict[str, Any],
+    history_exclusion_text: str,
+) -> str:
+    history_hint = _build_history_exposure_hint(history_exclusion_text)
+
+    def _csv_head(value: Any, limit: int) -> str:
+        items = [part.strip() for part in str(value or "").split(",") if part.strip()]
+        return ", ".join(items[:limit])
+
+    title = movie["title"]
+    if movie.get("year"):
+        title = f'{title} ({movie["year"]})'
+
+    details = [f'{movie["tmdb_id"]} | {title}']
+    genres = _csv_head(movie.get("genres"), 2)
+    if genres:
+        details.append(f"genres: {genres}")
+    director = str(movie.get("director", "")).strip()
+    if director:
+        details.append(f"director: {director}")
+    cast = _csv_head(movie.get("top_cast"), 1)
+    if cast:
+        details.append(f"cast: {cast}")
+    premise = str(movie.get("overview", "")).strip()
+    if premise:
+        details.append(f"premise: {premise[:120]}")
+
+    sections = [
+        "Write only the recommendation blurb for this already-selected movie.",
+        f"Request: {preferences}",
+    ]
+    if history_hint != "none":
+        sections.append(f"History: {history_hint}")
+    sections.extend(
+        [
+            f"Selected movie: {' | '.join(details)}",
+            'Return JSON only: {"description": "<2-3 sentences, under 500 chars>"}',
+            "Be personal, persuasive, and specific to this user.",
+        ]
+    )
+    return "\n".join(sections)
+
+
+def _route_shortlist(shortlist: list[dict[str, Any]], route: str) -> list[dict[str, Any]]:
+    if route == "judge_5":
+        return shortlist[:5]
+    if route == "judge_8":
+        return shortlist[:8]
+    return shortlist[:1]
 
 
 def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any]) -> str:
@@ -353,12 +485,23 @@ def _choose_with_llm(
     shortlist: list[dict[str, Any]],
     history_exclusion_text: str,
     timeout_seconds: float,
+    force_include_director: bool = False,
+    force_include_cast: bool = False,
+    force_include_country: bool = False,
 ) -> tuple[dict[str, Any], int]:
-    prompt = _build_selection_prompt(preferences, shortlist, history_exclusion_text)
+    prompt = _build_selection_prompt(
+        preferences,
+        shortlist,
+        history_exclusion_text,
+        force_include_director=force_include_director,
+        force_include_cast=force_include_cast,
+        force_include_country=force_include_country,
+    )
     response = _get_client(timeout_seconds).chat(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         format="json",
+        options=_final_llm_options(),
     )
 
     payload = _extract_json_object(response.message.content)
@@ -373,6 +516,26 @@ def _choose_with_llm(
     return result, len(prompt)
 
 
+def _describe_selected_movie(
+    preferences: str,
+    movie: dict[str, Any],
+    history_exclusion_text: str,
+    timeout_seconds: float,
+) -> tuple[dict[str, Any], int]:
+    prompt = _build_description_only_prompt(preferences, movie, history_exclusion_text)
+    response = _get_client(timeout_seconds).chat(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        format="json",
+        options=_description_llm_options(),
+    )
+    payload = _extract_json_object(response.message.content)
+    description = str(payload.get("description", "")).strip()
+    if not description:
+        raise ValueError("Description-only response was empty")
+    return {"tmdb_id": int(movie["tmdb_id"]), "description": description[:500]}, len(prompt)
+
+
 def _remaining_llm_timeout_seconds(started_at: float) -> float:
     elapsed = time.perf_counter() - started_at
     remaining = TOTAL_REQUEST_BUDGET_SECONDS - elapsed - FALLBACK_BUFFER_SECONDS - LLM_TIMEOUT_SAFETY_MARGIN_SECONDS
@@ -382,12 +545,42 @@ def _remaining_llm_timeout_seconds(started_at: float) -> float:
 @lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
     started_at = time.perf_counter()
+    intent_future = None
+    intent_started = 0.0
+    intent_used = False
+    if ENABLE_LLM_INTENT:
+        intent_started = time.perf_counter()
+        intent_future = INTENT_EXECUTOR.submit(_get_intent_override, preferences)
+
     shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
+    if intent_future is not None:
+        timeout_left = max(0.0, INTENT_LLM_TIMEOUT_S - (time.perf_counter() - intent_started))
+        try:
+            intent_override = intent_future.result(timeout=timeout_left)
+        except FuturesTimeoutError:
+            intent_override = {}
+        except Exception:
+            intent_override = {}
+        if intent_override:
+            shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(
+                preferences,
+                history,
+                retrieval_profile_override=intent_override,
+            )
+            intent_used = True
+
     retrieval_elapsed = time.perf_counter() - started_at
     shortlist = _enrich_shortlist(shortlist_refs, include_year=bool(prompt_profile.get("year_relevant")))
     if not shortlist:
         raise ValueError("No candidate movies available")
 
+    confidence_bundle = retrieval_profile.get("confidence_bundle", {})
+    route = confidence_bundle.get("route", "judge_8")
+    confidence = confidence_bundle.get("confidence", "low")
+    convergence = confidence_bundle.get("convergence", "weak")
+    llm_shortlist = _route_shortlist(shortlist, route)
+    force_include_person_fields = bool(retrieval_profile.get("has_named_person_signal"))
+    force_include_country = bool(prompt_profile.get("country_relevant"))
     prompt_chars = 0
     llm_elapsed = 0.0
     try:
@@ -395,19 +588,34 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
         if llm_timeout_seconds <= 0.5:
             raise TimeoutError("Not enough request budget left for LLM selection")
         llm_started = time.perf_counter()
-        result, prompt_chars = _choose_with_llm(
-            preferences,
-            shortlist,
-            retrieval_profile["history_exclusion_text"],
-            timeout_seconds=llm_timeout_seconds,
-        )
+        if route == "description_only":
+            result, prompt_chars = _describe_selected_movie(
+                preferences,
+                shortlist[0],
+                retrieval_profile["history_exclusion_text"],
+                timeout_seconds=llm_timeout_seconds,
+            )
+        else:
+            result, prompt_chars = _choose_with_llm(
+                preferences,
+                llm_shortlist,
+                retrieval_profile["history_exclusion_text"],
+                timeout_seconds=llm_timeout_seconds,
+                force_include_director=force_include_person_fields,
+                force_include_cast=force_include_person_fields,
+                force_include_country=force_include_country,
+            )
         llm_elapsed = time.perf_counter() - llm_started
         result["used_llm"] = True
         logger.info(
-            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s",
+            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s convergence=%s",
             retrieval_elapsed,
             llm_elapsed,
             False,
+            route,
+            confidence,
+            intent_used,
+            convergence,
         )
         return result
     except Exception as exc:
@@ -425,13 +633,20 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                     preferences,
                     shortlist,
                     retrieval_profile["history_exclusion_text"],
+                    force_include_director=force_include_person_fields,
+                    force_include_cast=force_include_person_fields,
+                    force_include_country=force_include_country,
                 )
             )
         logger.info(
-            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s",
+            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s convergence=%s",
             retrieval_elapsed,
             llm_elapsed,
             True,
+            route,
+            confidence,
+            intent_used,
+            convergence,
         )
         best = shortlist[0]
         return {
