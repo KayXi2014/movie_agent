@@ -34,7 +34,11 @@ def _artifacts_current() -> bool:
         embedding_meta = load_json(EMBEDDING_META_PATH)
     except Exception:
         return False
-    return metadata_matches(retrieval_meta, active_data_path) and metadata_matches(embedding_meta, active_data_path)
+    return (
+        metadata_matches(retrieval_meta, active_data_path)
+        and metadata_matches(embedding_meta, active_data_path)
+        and embedding_meta.get("embedding_provider") == "huggingface"
+    )
 
 
 def prepare_local_runtime(
@@ -102,6 +106,8 @@ def prepare_local_runtime(
                 "Could not rebuild retrieval artifacts because a data file is in use. "
                 "Stop any running API, Streamlit, or SQLite process using data/movies.sqlite and try again."
             ) from exc
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
     else:
         print("Retrieval artifacts already current. Skipping rebuild.")
 

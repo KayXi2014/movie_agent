@@ -71,8 +71,17 @@ def _build_intent_prompt(preferences: str) -> str:
     return (
         "Read the movie request and return only small retrieval hints as JSON.\n"
         "Return JSON only.\n"
-        "Use these optional keys when helpful: "
-        '{"genres": ["..."], "avoid": ["..."], "named_people": ["..."]}\n'
+        "Use these optional keys only when clear: "
+        '{"genres": ["..."], "avoid": ["..."], "named_people": ["..."], '
+        '"release_year": {"min": 1990, "max": 1999, "label": "1990s"}, '
+        '"setting_period": "contemporary setting", "tone": ["tense"], '
+        '"quality_preference": true, "country_or_language": ["Korean"]}\n'
+        "Use release_year only for release-date intent like released, made, from, recent, classic, before, after.\n"
+        "Use setting_period for story-world intent like modern story, set in modern times, period piece, set in the 1990s.\n"
+        "Use tone for fuzzy mood/style words like tense, grounded, thoughtful, feel-good, weird, scary, romantic.\n"
+        "Use quality_preference only when the user asks for high-rated, popular, well-reviewed, acclaimed, or crowd-pleasing movies.\n"
+        "Use country_or_language for country, nationality, or language preferences.\n"
+        'Example: "modern story" -> {"setting_period": "contemporary setting"} with no release_year.\n'
         f'Allowed genres: {genres_text}\n'
         f"Request: {preferences}"
     )
@@ -83,7 +92,7 @@ def _intent_llm_options() -> dict[str, Any]:
         "temperature": 0.0,
         "top_k": 10,
         "top_p": 0.5,
-        "num_predict": 120,
+        "num_predict": 180,
     }
 
 
@@ -135,6 +144,35 @@ def _get_intent_override(preferences: str) -> dict[str, Any]:
         result["avoid"] = avoid[:3]
     if named_people:
         result["named_people"] = named_people[:3]
+    release_year = payload.get("release_year")
+    if isinstance(release_year, dict):
+        try:
+            min_year = int(release_year.get("min", release_year.get("min_year", 0)))
+            max_year = int(release_year.get("max", release_year.get("max_year", 9999)))
+        except (TypeError, ValueError):
+            min_year = 0
+            max_year = -1
+        if min_year > 0 and max_year >= min_year:
+            result["release_year"] = {
+                "min": min_year,
+                "max": max_year,
+                "label": str(release_year.get("label") or f"{min_year}-{max_year}")[:40],
+            }
+    setting_period = " ".join(str(payload.get("setting_period", "") or "").split()).strip()
+    if setting_period:
+        result["setting_period"] = setting_period[:80]
+    tone = [" ".join(str(item or "").split()).strip() for item in payload.get("tone", []) if str(item or "").strip()]
+    if tone:
+        result["tone"] = tone[:4]
+    if isinstance(payload.get("quality_preference"), bool):
+        result["quality_preference"] = bool(payload["quality_preference"])
+    country_or_language = [
+        " ".join(str(item or "").split()).strip()
+        for item in payload.get("country_or_language", [])
+        if str(item or "").strip()
+    ]
+    if country_or_language:
+        result["country_or_language"] = country_or_language[:3]
     return result
 
 
@@ -221,6 +259,8 @@ def _build_selection_prompt(
     force_include_director: bool = False,
     force_include_cast: bool = False,
     force_include_country: bool = False,
+    constraint_note: str = "",
+    setting_period: str = "",
 ) -> str:
     history_hint = _build_history_exposure_hint(history_exclusion_text)
     normalized_preferences = _normalize_text(preferences)
@@ -299,6 +339,10 @@ def _build_selection_prompt(
     ]
     if history_hint != "none":
         sections.append(f"History: {history_hint}")
+    if constraint_note:
+        sections.append(f"Constraint note: {constraint_note}")
+    if setting_period:
+        sections.append(f"Story setting preference: {setting_period}")
     sections.extend(
         [
             "",
@@ -308,6 +352,9 @@ def _build_selection_prompt(
             "- Judge each movie only by the dataset-backed candidate details shown below.",
             "- If the user references a director or actor, treat matching director/cast details as an important clue.",
             "- If a year is shown, use it only when the request cares about recency or era.",
+            "- Treat story setting as when/where the story takes place, not as the movie release year.",
+            "- If no candidate fully satisfies a requested constraint, still choose the closest candidate from the list and acknowledge the limitation briefly.",
+            "- Some lower-ranked candidates may be included because they preserve an explicit cast, director, or year match; weigh those hard clues over raw rank.",
             "- Do not introduce qualities that are not supported by the request or the candidate details.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
             "",
@@ -327,6 +374,7 @@ def _build_description_only_prompt(
     preferences: str,
     movie: dict[str, Any],
     history_exclusion_text: str,
+    setting_period: str = "",
 ) -> str:
     history_hint = _build_history_exposure_hint(history_exclusion_text)
 
@@ -358,6 +406,8 @@ def _build_description_only_prompt(
     ]
     if history_hint != "none":
         sections.append(f"History: {history_hint}")
+    if setting_period:
+        sections.append(f"Story setting preference: {setting_period}")
     sections.extend(
         [
             f"Selected movie: {' | '.join(details)}",
@@ -434,6 +484,9 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
     if tones:
         reason = ", ".join(tones[:2])
         fit_line = f"If you want something {reason} right now, this lands better because the appeal comes from the story pressure and mood, not empty spectacle."
+    elif prompt_profile.get("setting_period"):
+        setting = str(prompt_profile["setting_period"])
+        fit_line = f"If you want a {setting} feel, this is the closest fit in the current shortlist because its setup keeps the story immediate and easy to enter."
     elif prompt_profile["target_genres"]:
         target = ", ".join(prompt_profile["target_genres"][:2])
         fit_line = f"If you want something in the {target} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
@@ -488,6 +541,8 @@ def _choose_with_llm(
     force_include_director: bool = False,
     force_include_cast: bool = False,
     force_include_country: bool = False,
+    constraint_note: str = "",
+    setting_period: str = "",
 ) -> tuple[dict[str, Any], int]:
     prompt = _build_selection_prompt(
         preferences,
@@ -496,6 +551,8 @@ def _choose_with_llm(
         force_include_director=force_include_director,
         force_include_cast=force_include_cast,
         force_include_country=force_include_country,
+        constraint_note=constraint_note,
+        setting_period=setting_period,
     )
     response = _get_client(timeout_seconds).chat(
         model=MODEL,
@@ -507,7 +564,21 @@ def _choose_with_llm(
     payload = _extract_json_object(response.message.content)
     selection_payload = payload.get("selection") if isinstance(payload.get("selection"), dict) else payload
 
-    tmdb_id = _resolve_selected_tmdb_id(selection_payload, shortlist)
+    try:
+        tmdb_id = _resolve_selected_tmdb_id(selection_payload, shortlist)
+    except ValueError:
+        tmdb_id = int(shortlist[0]["tmdb_id"])
+        fallback_title = shortlist[0]["title"]
+        raw_description = str(selection_payload.get("description", "") or "").strip()
+        if raw_description:
+            selection_payload["description"] = (
+                f"{raw_description} The closest available pick from this shortlist is {fallback_title}."
+            )
+        else:
+            selection_payload["description"] = (
+                f"I do not see a perfect match for every constraint in the available shortlist, "
+                f"so the closest available pick is {fallback_title}."
+            )
 
     result = {
         "tmdb_id": tmdb_id,
@@ -521,8 +592,9 @@ def _describe_selected_movie(
     movie: dict[str, Any],
     history_exclusion_text: str,
     timeout_seconds: float,
+    setting_period: str = "",
 ) -> tuple[dict[str, Any], int]:
-    prompt = _build_description_only_prompt(preferences, movie, history_exclusion_text)
+    prompt = _build_description_only_prompt(preferences, movie, history_exclusion_text, setting_period=setting_period)
     response = _get_client(timeout_seconds).chat(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -581,6 +653,7 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
     llm_shortlist = _route_shortlist(shortlist, route)
     force_include_person_fields = bool(retrieval_profile.get("has_named_person_signal"))
     force_include_country = bool(prompt_profile.get("country_relevant"))
+    setting_period = str(prompt_profile.get("setting_period", "") or "")
     prompt_chars = 0
     llm_elapsed = 0.0
     try:
@@ -594,6 +667,7 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                 shortlist[0],
                 retrieval_profile["history_exclusion_text"],
                 timeout_seconds=llm_timeout_seconds,
+                setting_period=setting_period,
             )
         else:
             result, prompt_chars = _choose_with_llm(
@@ -604,6 +678,8 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                 force_include_director=force_include_person_fields,
                 force_include_cast=force_include_person_fields,
                 force_include_country=force_include_country,
+                constraint_note=str(retrieval_profile.get("candidate_constraint_note", "")),
+                setting_period=setting_period,
             )
         llm_elapsed = time.perf_counter() - llm_started
         result["used_llm"] = True
@@ -636,6 +712,8 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                     force_include_director=force_include_person_fields,
                     force_include_cast=force_include_person_fields,
                     force_include_country=force_include_country,
+                    constraint_note=str(retrieval_profile.get("candidate_constraint_note", "")),
+                    setting_period=setting_period,
                 )
             )
         logger.info(

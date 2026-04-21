@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from functools import lru_cache
 from typing import Any
 
+import httpx
 import numpy as np
 
 from retrieval import (
@@ -18,6 +20,9 @@ from retrieval import (
 )
 
 logger = logging.getLogger(__name__)
+EMBEDDING_PROVIDER = "huggingface"
+HF_FEATURE_EXTRACTION_BASE_URL = "https://router.huggingface.co/hf-inference/models"
+PLACEHOLDER_HF_KEYS = {"", "your_key_here", "your_key", "xxxxx", "xxxx", "replace_me"}
 
 
 @lru_cache(maxsize=1)
@@ -28,58 +33,70 @@ def semantic_ready() -> bool:
         metadata = load_json(EMBEDDING_META_PATH)
     except Exception:
         return False
-    return metadata_matches(metadata, ACTIVE_DATA_PATH)
+    return metadata_matches(metadata, ACTIVE_DATA_PATH) and metadata.get("embedding_provider") == EMBEDDING_PROVIDER
 
 
 def semantic_runtime_status() -> dict[str, Any]:
+    metadata = _embedding_metadata()
     if not semantic_ready():
         return {
             "ready": False,
             "reason": "artifacts_unavailable",
-            "model_name": _model_name(),
+            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_model": _model_name(metadata),
+            "embedding_dim": _embedding_dim(metadata),
         }
 
-    encoder = _get_encoder()
-    if encoder is None:
+    if os.getenv("HF_TOKEN", "").strip().lower() in PLACEHOLDER_HF_KEYS:
         return {
             "ready": False,
-            "reason": "encoder_unavailable",
-            "model_name": _model_name(),
+            "reason": "hf_token_missing",
+            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_model": _model_name(metadata),
+            "embedding_dim": _embedding_dim(metadata),
         }
 
     return {
         "ready": True,
         "reason": "ok",
-        "model_name": _model_name(),
+        "embedding_provider": EMBEDDING_PROVIDER,
+        "embedding_model": _model_name(metadata),
+        "embedding_dim": _embedding_dim(metadata),
     }
 
 
-def _model_name() -> str:
-    model_name = DEFAULT_EMBEDDING_MODEL
+def _embedding_metadata() -> dict[str, Any]:
     if EMBEDDING_META_PATH.exists():
         try:
-            model_name = str(load_json(EMBEDDING_META_PATH).get("embedding_model") or model_name)
+            return load_json(EMBEDDING_META_PATH)
         except Exception:
-            model_name = DEFAULT_EMBEDDING_MODEL
-    return model_name
+            return {}
+    return {}
 
 
-@lru_cache(maxsize=1)
-def _get_encoder():
-    from sentence_transformers import SentenceTransformer
+def _model_name(metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata if metadata is not None else _embedding_metadata()
+    if metadata.get("embedding_provider") != EMBEDDING_PROVIDER:
+        return DEFAULT_EMBEDDING_MODEL
+    return str(metadata.get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
 
-    model_name = _model_name()
-    try:
-        # Runtime semantic retrieval should stay local-only: embed the user query
-        # against the already prepared model and compare it to local embeddings.
-        return SentenceTransformer(model_name, local_files_only=True)
-    except Exception as exc:
-        logger.warning(
-            "Semantic encoder unavailable for local-only query embedding: model=%s error=%r",
-            model_name,
-            exc,
-        )
+
+def _embedding_dim(metadata: dict[str, Any] | None = None) -> int | None:
+    metadata = metadata if metadata is not None else _embedding_metadata()
+    raw_dim = metadata.get("embedding_dim")
+    if raw_dim in (None, ""):
         return None
+    try:
+        return int(raw_dim)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hf_token() -> str:
+    token = os.getenv("HF_TOKEN", "").strip()
+    if token.lower() in PLACEHOLDER_HF_KEYS:
+        raise RuntimeError("HF_TOKEN is required for Hugging Face query embeddings")
+    return token
 
 
 @lru_cache(maxsize=1)
@@ -89,12 +106,50 @@ def _load_embeddings() -> tuple[np.ndarray, np.ndarray]:
     return embeddings, tmdb_ids
 
 
+def _normalize_vector(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 0.0:
+        raise ValueError("Embedding vector has zero norm")
+    return (vector / norm).astype(np.float32, copy=False)
+
+
+def _hf_embedding_url(model_name: str) -> str:
+    base_url = os.getenv("HF_EMBEDDING_BASE_URL", HF_FEATURE_EXTRACTION_BASE_URL).rstrip("/")
+    return f"{base_url}/{model_name}/pipeline/feature-extraction"
+
+
+def _extract_hf_embedding(payload: object) -> list[float]:
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("Hugging Face embedding response was empty or malformed")
+    if all(isinstance(item, (int, float)) for item in payload):
+        return payload
+    first = payload[0]
+    if isinstance(first, list) and all(isinstance(item, (int, float)) for item in first):
+        return first
+    raise ValueError("Hugging Face embedding response had an unexpected nested shape")
+
+
+def _encode_hf_query(query_text: str, model_name: str, expected_dim: int | None) -> np.ndarray:
+    if expected_dim is None:
+        raise RuntimeError("Hugging Face embedding artifacts must declare embedding_dim")
+    response = httpx.post(
+        _hf_embedding_url(model_name),
+        headers={"Authorization": f"Bearer {_hf_token()}"},
+        json={"inputs": [query_text], "options": {"wait_for_model": True}},
+        timeout=float(os.getenv("HF_EMBED_TIMEOUT_SECONDS", "20")),
+    )
+    response.raise_for_status()
+    query_vector = np.asarray(_extract_hf_embedding(response.json()), dtype=np.float32)
+    if query_vector.shape[0] != expected_dim:
+        raise ValueError(f"Hugging Face query embedding dimension {query_vector.shape[0]} does not match artifact dimension {expected_dim}")
+    return _normalize_vector(query_vector)
+
+
 def _encode_query(query_text: str) -> np.ndarray:
-    encoder = _get_encoder()
-    if encoder is None:
-        raise RuntimeError("Local semantic encoder is unavailable")
-    vector = encoder.encode([query_text], normalize_embeddings=True)
-    return np.asarray(vector[0], dtype=np.float32)
+    metadata = _embedding_metadata()
+    model_name = _model_name(metadata)
+    expected_dim = _embedding_dim(metadata)
+    return _encode_hf_query(query_text, model_name, expected_dim)
 
 
 @lru_cache(maxsize=1)
@@ -103,7 +158,7 @@ def warm_semantic_runtime() -> bool:
         return False
     try:
         _load_embeddings()
-        return _get_encoder() is not None
+        return os.getenv("HF_TOKEN", "").strip().lower() not in PLACEHOLDER_HF_KEYS
     except Exception as exc:
         logger.warning("Semantic runtime warm-up failed: %r", exc)
         return False

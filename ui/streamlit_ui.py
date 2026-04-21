@@ -30,6 +30,18 @@ DEBUG_MODE_OPTIONS = {
     "Lexical only": "lexical",
     "Full local pipeline": "hybrid",
 }
+ROUTE_LABELS = {
+    "description_only": "High confidence: describe top pick only",
+    "judge_5": "Medium confidence: judge top 5",
+    "judge_8": "Low confidence: judge top 8",
+    "judge_10": "Low confidence: judge top 10",
+}
+ROUTE_SHORTLIST_LIMITS = {
+    "description_only": 1,
+    "judge_5": 5,
+    "judge_8": 8,
+    "judge_10": 10,
+}
 
 
 def lookup_title(tmdb_id: Any) -> str:
@@ -126,12 +138,26 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
         )
 
     st.markdown("### Retrieval Debug")
+    confidence_bundle = retrieval_profile.get("confidence_bundle", {})
+    route = str(confidence_bundle.get("route", "judge_8"))
+    confidence = str(confidence_bundle.get("confidence", "low"))
+    convergence = str(confidence_bundle.get("convergence", "weak"))
+    routed_limit = min(ROUTE_SHORTLIST_LIMITS.get(route, len(shortlist_refs)), len(shortlist_refs))
+
     st.caption(
         f"Debug mode: {effective_mode} | "
         f"Retrieval mode: {retrieval_profile.get('retrieval_mode', 'unknown')} | "
         f"Candidates shown: {len(shortlist_refs)} | "
+        f"Final LLM candidates: {routed_limit} | "
         f"Semantic hits: {retrieval_profile.get('semantic_hit_count', 0)}"
     )
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Confidence", confidence)
+    metric_cols[1].metric("Route", route)
+    metric_cols[2].metric("Convergence", convergence)
+    metric_cols[3].metric("LLM shortlist", routed_limit)
+    st.caption(ROUTE_LABELS.get(route, "Adaptive route selected by retrieval confidence."))
 
     if effective_mode == "lexical":
         if semantic_status["ready"]:
@@ -142,24 +168,74 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
                 f"Reason: {semantic_status['reason']}."
             )
 
-    if prompt_profile.get("preferred_themes") or prompt_profile.get("avoid") or prompt_profile.get("target_genres"):
+    debug_summary = {
+        "target_genres": prompt_profile.get("target_genres", []),
+        "tone": prompt_profile.get("tone", []),
+        "avoid": prompt_profile.get("avoid", []),
+        "setting_period": prompt_profile.get("setting_period", ""),
+        "year_constraint": prompt_profile.get("year_constraint"),
+        "year_constraint_unavailable": prompt_profile.get("year_constraint_unavailable", False),
+        "country_relevant": prompt_profile.get("country_relevant", False),
+        "quality_preference": retrieval_profile.get("quality_preference", False),
+        "country_or_language_signals": retrieval_profile.get("country_or_language_signals", []),
+    }
+    debug_summary = {
+        key: value
+        for key, value in debug_summary.items()
+        if value not in (None, "", [], False)
+    }
+    if debug_summary:
+        st.markdown("#### Parsed Request Signals")
+        st.code(json.dumps(debug_summary, indent=2), language="json")
+
+    st.markdown("#### Confidence Details")
+    confidence_summary = {
+        key: confidence_bundle.get(key)
+        for key in (
+            "confidence",
+            "route",
+            "specificity",
+            "convergence",
+            "top_fulfillment",
+            "gap1",
+            "gap5",
+            "contradictions",
+            "semantic_available",
+            "lexical_available",
+            "top_candidate_tmdb_id",
+        )
+        if key in confidence_bundle
+    }
+    if confidence_summary:
+        st.code(json.dumps(confidence_summary, indent=2), language="json")
+
+    if prompt_profile.get("preferred_themes"):
         debug_summary = {
-            "target_genres": prompt_profile.get("target_genres", []),
             "preferred_themes": prompt_profile.get("preferred_themes", []),
-            "avoid": prompt_profile.get("avoid", []),
         }
         st.code(json.dumps(debug_summary, indent=2), language="json")
 
+    st.markdown("#### Retrieval Shortlist")
+    st.caption(
+        "Rows marked `sent_to_final_llm=True` are the candidates that would be included in the final LLM prompt for this confidence route."
+    )
     shortlist_rows = []
     for rank, movie in enumerate(shortlist_refs, start=1):
         shortlist_rows.append(
             {
                 "rank": rank,
+                "sent_to_final_llm": rank <= routed_limit,
                 "tmdb_id": movie["tmdb_id"],
                 "title": movie["title"],
                 "score": movie.get("score"),
                 "semantic": movie.get("semantic_score"),
                 "fts": movie.get("fts_score"),
+                "keywords": movie.get("keyword_alignment_score"),
+                "genres": movie.get("genre_alignment_score"),
+                "avoid": movie.get("avoid_penalty_score"),
+                "person": movie.get("person_anchor_score"),
+                "year": movie.get("year_alignment_score"),
+                "seed": movie.get("seed_similarity_score"),
             }
         )
 
@@ -171,7 +247,7 @@ st.caption("Frontend for the FastAPI movie recommendation endpoint, with optiona
 
 with st.sidebar:
     st.header("API Settings")
-    api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8080")
+    api_base_url = st.text_input("Backend URL", value="http://127.0.0.1:8000")
     request_timeout = st.number_input("Request timeout (seconds)", min_value=1, max_value=120, value=25)
     show_local_debug = st.checkbox("Show retrieval debug", value=True)
     debug_mode = st.selectbox(
@@ -179,7 +255,7 @@ with st.sidebar:
         options=list(DEBUG_MODE_OPTIONS),
         index=0,
         disabled=not show_local_debug,
-        help="Auto uses semantic retrieval when this Streamlit process can load the local embedding model.",
+        help="Auto uses semantic retrieval when Hugging Face embedding artifacts and HF_TOKEN are available.",
     )
 
 st.subheader("User Inputs")

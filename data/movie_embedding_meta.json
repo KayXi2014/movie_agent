@@ -2,6 +2,7 @@
   "artifact_type": "semantic_embeddings",
   "embedding_dim": 384,
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_provider": "huggingface",
   "row_count": 1000,
   "source_name": "tmdb_top1000_movies_enriched.csv",
   "source_path": "data/tmdb_top1000_movies_enriched.csv",

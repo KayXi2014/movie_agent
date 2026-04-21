@@ -42,6 +42,7 @@ TEXT_COLUMNS = [
     "top_cast",
     "original_language",
     "production_countries",
+    "production_companies",
     "collection_name",
     "spoken_languages",
     "alternative_titles",
@@ -52,6 +53,7 @@ OPTIONAL_TEXT_COLUMNS = [
     "spoken_languages",
     "alternative_titles",
     "us_rating",
+    "production_companies",
 ]
 OPTIONAL_DATA_COLUMNS = [
     "similar_tmdb_ids",
@@ -112,6 +114,7 @@ GENRE_ALIASES = {
     "horror": "horror",
     "mystery": "mystery",
     "romance": "romance",
+    "romantic": "romance",
     "sci fi": "science fiction",
     "sci-fi": "science fiction",
     "science fiction": "science fiction",
@@ -119,32 +122,11 @@ GENRE_ALIASES = {
     "war": "war",
     "western": "western",
 }
-TONE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bgrounded\b", re.IGNORECASE), "grounded"),
-    (re.compile(r"\bserious\b", re.IGNORECASE), "serious"),
-    (re.compile(r"\bdark\b", re.IGNORECASE), "dark"),
-    (re.compile(r"\bgritty\b", re.IGNORECASE), "gritty"),
-    (re.compile(r"\btense\b", re.IGNORECASE), "tense"),
-    (re.compile(r"\bintense\b", re.IGNORECASE), "intense"),
-    (re.compile(r"\bwarm\b", re.IGNORECASE), "warm"),
-    (re.compile(r"\bintimate\b", re.IGNORECASE), "intimate"),
-    (re.compile(r"\bthoughtful\b", re.IGNORECASE), "thoughtful"),
-    (re.compile(r"\bcerebral\b", re.IGNORECASE), "cerebral"),
-    (re.compile(r"\bhaunting\b", re.IGNORECASE), "haunting"),
-    (re.compile(r"\bbleak\b", re.IGNORECASE), "bleak"),
-    (re.compile(r"\bmoody\b", re.IGNORECASE), "moody"),
-    (re.compile(r"\blighthearted\b|\blight-hearted\b", re.IGNORECASE), "lighthearted"),
-    (re.compile(r"\buplifting\b", re.IGNORECASE), "uplifting"),
-    (re.compile(r"\bromantic\b", re.IGNORECASE), "romantic"),
-    (re.compile(r"\bfunny\b", re.IGNORECASE), "funny"),
-    (re.compile(r"\bcampy\b", re.IGNORECASE), "campy"),
-)
 YEAR_SIGNAL_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b(?:19|20)\d0s\b|\b(?:80s|90s|2000s|2010s|2020s)\b", re.IGNORECASE)
 YEAR_SIGNAL_PHRASES = (
     "recent",
     "newer",
     "latest",
-    "modern",
     "older",
     "classic",
     "relatively new",
@@ -154,6 +136,68 @@ YEAR_SIGNAL_PHRASES = (
     "this decade",
     "last decade",
 )
+RELEASE_YEAR_CONTEXT_RE = re.compile(
+    r"\b(?:released|release|made|produced|came out|from|movie from|film from|after|before|since|newer than|older than|between|recent|newer|latest|classic)\b",
+    re.IGNORECASE,
+)
+SETTING_PERIOD_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:based in modern times|set in modern times|takes place in modern times|modern setting|modern day|modern-day|present day|present-day)\b", re.IGNORECASE), "contemporary setting"),
+    (re.compile(r"\b(?:period piece|period drama|historical setting|set in the past)\b", re.IGNORECASE), "historical setting"),
+    (re.compile(r"\bset (?:in|during) (?:the )?((?:19|20)\d0s|80s|90s|(?:19|20)\d{2})\b", re.IGNORECASE), "period setting"),
+)
+
+
+def extract_year_constraint(preferences: str) -> dict[str, Any] | None:
+    normalized = normalize_text(preferences)
+    if not normalized:
+        return None
+    if re.search(r"\bset (?:in|during)\b", normalized) and not RELEASE_YEAR_CONTEXT_RE.search(normalized):
+        return None
+
+    between = re.search(r"\bbetween\s+((?:19|20)\d{2})\s+and\s+((?:19|20)\d{2})\b", normalized)
+    if between:
+        start, end = sorted((int(between.group(1)), int(between.group(2))))
+        return {"min_year": start, "max_year": end, "label": f"between {start} and {end}"}
+
+    decade = re.search(r"\b((?:19|20)\d0)s\b", normalized)
+    if decade:
+        start = int(decade.group(1))
+        return {"min_year": start, "max_year": start + 9, "label": f"{start}s"}
+
+    short_decade = re.search(r"\b(80|90)s\b", normalized)
+    if short_decade:
+        start = 1900 + int(short_decade.group(1))
+        return {"min_year": start, "max_year": start + 9, "label": f"{start}s"}
+
+    year_match = re.search(r"\b((?:19|20)\d{2})\b", normalized)
+    if not year_match:
+        return None
+
+    year = int(year_match.group(1))
+    prefix = normalized[max(0, year_match.start() - 24) : year_match.start()]
+    if re.search(r"\b(after|post|newer than|since)\s+$", prefix):
+        min_year = year + (1 if "after" in prefix or "newer than" in prefix or "post" in prefix else 0)
+        return {"min_year": min_year, "max_year": 9999, "label": f"after {year}"}
+    if re.search(r"\b(before|pre|older than|prior to)\s+$", prefix):
+        max_year = year - (1 if "before" in prefix or "older than" in prefix or "pre" in prefix else 0)
+        return {"min_year": 0, "max_year": max_year, "label": f"before {year}"}
+    if re.search(r"\b(from|in|around)\s+(?:the\s+)?$", prefix):
+        return {"min_year": year, "max_year": year, "label": str(year)}
+    return None
+
+
+def extract_setting_period(preferences: str) -> str:
+    normalized = normalize_text(preferences)
+    for pattern, label in SETTING_PERIOD_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        if label == "period setting" and match.groups():
+            return f"set in {match.group(1)}"
+        return label
+    return ""
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -314,6 +358,7 @@ def extract_negation_context(preferences: str) -> dict[str, Any]:
         tokens = tokenize(phrase)
         negative_tokens.update(tokens)
         negative_match_tokens.update(match_tokens(phrase))
+        negative_match_tokens.update({normalize_match_token(token) for token in tokens})
         phrase_variants = {phrase, phrase.replace("-", " ")}
         for variant in phrase_variants:
             if variant in GENRE_ALIASES:
@@ -389,6 +434,18 @@ KNOWN_PERSON_NAMES = tuple(
             for row in MOVIES.itertuples()
             for name in (*row.director_set, *row.cast_set)
             if len(tokenize(name)) >= 2
+        },
+        key=len,
+        reverse=True,
+    )
+)
+KNOWN_COUNTRY_LANGUAGE_TERMS = tuple(
+    sorted(
+        {
+            term
+            for row in MOVIES.itertuples()
+            for term in (*split_csvish(row.production_countries), *split_csvish(row.spoken_languages))
+            if len(term) >= 4
         },
         key=len,
         reverse=True,
@@ -557,6 +614,15 @@ def extract_named_person_signals(preferences: str) -> list[str]:
     return matches[:6]
 
 
+def extract_country_or_language_signals(preferences: str) -> list[str]:
+    normalized = normalize_text(preferences)
+    matches: list[str] = []
+    for term in KNOWN_COUNTRY_LANGUAGE_TERMS:
+        if _phrase_mentioned(normalized, term):
+            matches.append(term)
+    return matches[:3]
+
+
 def build_retrieval_profile(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
@@ -571,12 +637,17 @@ def build_retrieval_profile(
     seed_df = preference_seed_rows(preferences, history_df)
     seed_signals = derive_seed_signals(seed_df)
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
+    year_constraint = extract_year_constraint(preferences)
+    setting_period = extract_setting_period(preferences)
+    country_or_language_signals = extract_country_or_language_signals(preferences)
 
     positive_query_tokens = set(negation_context["positive_query_tokens"])
     positive_query_tokens.difference_update(seed_signals["seed_title_tokens"])
 
     for genre in explicit_genre_targets:
         positive_query_tokens.update(tokenize(genre))
+    for signal in country_or_language_signals:
+        positive_query_tokens.update(tokenize(signal))
 
     negative_tokens = set(negation_context["negative_tokens"])
     seed_query_tokens = derive_seed_query_tokens(seed_signals)
@@ -603,6 +674,13 @@ def build_retrieval_profile(
         "lexical_query_text": lexical_query_text,
         "semantic_query_text": semantic_query_text,
         "similarity_request": similarity_request,
+        "year_constraint": year_constraint,
+        "setting_period": setting_period,
+        "tone": [],
+        "quality_preference": False,
+        "country_or_language_signals": country_or_language_signals,
+        "year_constraint_unavailable": False,
+        "candidate_constraint_note": "",
         "exclude_seed_tmdb_ids": seed_signals["seed_tmdb_ids"] if similarity_request else set(),
         **seed_signals,
         "seed_query_tokens": seed_query_tokens,
@@ -647,39 +725,68 @@ def merge_intent_override(retrieval_profile: dict[str, Any], intent_override: di
         merged["named_person_signals"] = named_person_signals[:6]
         merged["has_named_person_signal"] = bool(merged["named_person_signals"])
 
+    release_year = intent_override.get("release_year")
+    if isinstance(release_year, dict):
+        try:
+            min_year = int(release_year.get("min", release_year.get("min_year", 0)))
+            max_year = int(release_year.get("max", release_year.get("max_year", 9999)))
+            if min_year > 0 and max_year >= min_year:
+                merged["year_constraint"] = {
+                    "min_year": min_year,
+                    "max_year": max_year,
+                    "label": str(release_year.get("label") or f"{min_year}-{max_year}"),
+                }
+        except (TypeError, ValueError):
+            pass
+
+    setting_period = " ".join(str(intent_override.get("setting_period", "") or "").split()).strip()
+    if setting_period:
+        merged["setting_period"] = setting_period[:80]
+        merged["positive_query_tokens"].update(tokenize(setting_period))
+
+    tone = [" ".join(str(item or "").split()).strip() for item in intent_override.get("tone", []) if str(item or "").strip()]
+    if tone:
+        merged["tone"] = tone[:4]
+        for item in merged["tone"]:
+            merged["positive_query_tokens"].update(tokenize(item))
+
+    if isinstance(intent_override.get("quality_preference"), bool):
+        merged["quality_preference"] = bool(intent_override["quality_preference"])
+
+    country_or_language = [
+        " ".join(str(item or "").split()).strip()
+        for item in intent_override.get("country_or_language", [])
+        if str(item or "").strip()
+    ]
+    if country_or_language:
+        merged["country_or_language_signals"] = country_or_language[:3]
+        for item in merged["country_or_language_signals"]:
+            merged["positive_query_tokens"].update(tokenize(item))
+
     merged["lexical_query_text"] = " ".join(sorted(merged["positive_query_tokens"])) or merged["lexical_query_text"]
+    semantic_hints = [
+        str(merged.get("setting_period", "") or ""),
+        " ".join(merged.get("tone", [])),
+        " ".join(merged.get("country_or_language_signals", [])),
+    ]
+    semantic_hint_text = " ".join(item for item in semantic_hints if item).strip()
+    if semantic_hint_text:
+        merged["semantic_query_text"] = f"{merged['semantic_query_text']} {semantic_hint_text}".strip()
     return merged
 
 
 def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_text(preferences)
-    tone: list[str] = []
-    for pattern, canonical in TONE_PATTERNS:
-        if pattern.search(normalized) and canonical not in tone:
-            tone.append(canonical)
-    year_relevant = bool(YEAR_SIGNAL_RE.search(normalized)) or any(phrase in normalized for phrase in YEAR_SIGNAL_PHRASES)
-    country_relevant_tokens = {
-        "foreign",
-        "international",
-        "country",
-        "countries",
-        "language",
-        "languages",
-        "korean",
-        "japanese",
-        "french",
-        "spanish",
-        "italian",
-        "german",
-        "british",
-        "english",
-    }
+    year_relevant = bool(retrieval_profile.get("year_constraint")) or any(phrase in normalized for phrase in YEAR_SIGNAL_PHRASES)
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
-        "tone": tone[:3],
+        "tone": list(retrieval_profile.get("tone", []))[:3],
         "avoid": retrieval_profile["negative_phrases"][:6],
         "year_relevant": year_relevant,
-        "country_relevant": bool(set(tokenize(preferences)) & country_relevant_tokens),
+        "year_constraint": retrieval_profile.get("year_constraint"),
+        "year_constraint_unavailable": bool(retrieval_profile.get("year_constraint_unavailable")),
+        "setting_period": retrieval_profile.get("setting_period", ""),
+        "country_relevant": bool(retrieval_profile.get("country_or_language_signals")),
     }
 
 
@@ -689,6 +796,7 @@ def _component_scores(row: pd.Series, retrieval_profile: dict[str, Any]) -> dict
         "genre_alignment_score": round(genre_alignment_score(row, retrieval_profile), 3),
         "avoid_penalty_score": round(avoid_penalty_score(row, retrieval_profile), 3),
         "person_anchor_score": round(person_anchor_score(row, retrieval_profile), 3),
+        "year_alignment_score": round(year_alignment_score(row, retrieval_profile), 3),
         "seed_similarity_score": round(_normalize_component(seed_similarity_score(row, retrieval_profile), 8.0), 3),
     }
 
@@ -722,6 +830,7 @@ def build_confidence_bundle(
     specificity_points += 1 if retrieval_profile["negative_phrases"] else 0
     specificity_points += 1 if retrieval_profile.get("named_person_signals") else 0
     specificity_points += 1 if prompt_profile.get("year_relevant") else 0
+    specificity_points += 1 if prompt_profile.get("setting_period") else 0
     specificity_points += 1 if retrieval_profile.get("similarity_request") else 0
     if specificity_points >= 3:
         specificity = "high"
@@ -750,12 +859,19 @@ def build_confidence_bundle(
         contradictions.append("person_miss")
     if retrieval_profile.get("similarity_request") and float(top.get("seed_similarity_score", 0.0)) < 0.2:
         contradictions.append("seed_miss")
+    if (
+        retrieval_profile.get("year_constraint")
+        and not retrieval_profile.get("year_constraint_unavailable")
+        and float(top.get("year_alignment_score", 0.0)) <= 0.0
+    ):
+        contradictions.append("year_miss")
 
     keyword_score = float(top.get("keyword_alignment_score", 0.0))
     genre_score = float(top.get("genre_alignment_score", 0.0))
     avoid_score = float(top.get("avoid_penalty_score", 0.0))
     person_score = float(top.get("person_anchor_score", 0.0))
     seed_score = float(top.get("seed_similarity_score", 0.0))
+    year_score = float(top.get("year_alignment_score", 0.0))
 
     high_match = keyword_score >= 0.3 and avoid_score <= 0.1
     medium_match = keyword_score >= 0.16 and avoid_score <= 0.25
@@ -768,6 +884,9 @@ def build_confidence_bundle(
     if retrieval_profile.get("similarity_request"):
         high_match = high_match and seed_score >= 0.2
         medium_match = medium_match and seed_score >= 0.1
+    if retrieval_profile.get("year_constraint") and not retrieval_profile.get("year_constraint_unavailable"):
+        high_match = high_match and year_score > 0.0
+        medium_match = medium_match and year_score > 0.0
 
     if contradictions:
         top_fulfillment = "low"
@@ -883,7 +1002,20 @@ def avoid_penalty_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> fl
         1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
     )
     hard_block = 1.0 if retrieval_profile["hard_block_genres"].intersection(row["genres_set"]) else 0.0
-    return _normalize_component(float(negative_overlap + phrase_hits) + hard_block * 2.0, 5.0)
+    return _normalize_component(float(negative_overlap) + phrase_hits * 2.0 + hard_block * 3.0, 4.0)
+
+
+def year_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+    constraint = retrieval_profile.get("year_constraint")
+    if not constraint or retrieval_profile.get("year_constraint_unavailable"):
+        return 0.0
+    try:
+        year = int(row["year"])
+    except (TypeError, ValueError):
+        return -1.0
+    if int(constraint["min_year"]) <= year <= int(constraint["max_year"]):
+        return 1.0
+    return -1.0
 
 
 def quality_prior_score(row: pd.Series) -> float:
@@ -928,6 +1060,9 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     avoid_component = avoid_penalty_score(row, retrieval_profile)
     novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     person_component = person_anchor_score(row, retrieval_profile)
+    year_component = year_alignment_score(row, retrieval_profile)
+    year_reward = max(0.0, year_component)
+    year_penalty = max(0.0, -year_component)
     if retrieval_profile.get("has_named_person_signal"):
         semantic_weight = 0.48
         fts_weight = 0.22
@@ -936,16 +1071,19 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
         semantic_weight = 0.62
         fts_weight = 0.16
         person_weight = 0.0
+    quality_weight = 0.40 if retrieval_profile.get("quality_preference") else 0.13
     return (
         semantic_weight * semantic_component
         + fts_weight * fts_component
         + 0.10 * keyword_component
-        + 0.08 * quality_component
+        + quality_weight * quality_component
         + 0.12 * seed_component
         + 0.10 * genre_reward
+        + 0.16 * year_reward
         + person_weight * person_component
-        - 0.18 * avoid_component
+        - 0.36 * avoid_component
         - 0.10 * genre_penalty
+        - 0.35 * year_penalty
         - 0.05 * novelty_component
     )
 
@@ -959,10 +1097,12 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
     return (
         2.5 * keyword_alignment_score(row, retrieval_profile)
         + 0.9 * seed_similarity_score(row, retrieval_profile)
-        + 0.8 * quality_prior_score(row)
+        + (1.8 if retrieval_profile.get("quality_preference") else 1.0) * quality_prior_score(row)
         + 0.6 * max(0.0, genre_alignment_score(row, retrieval_profile))
         + 0.8 * person_anchor_score(row, retrieval_profile)
-        - 1.8 * avoid_penalty_score(row, retrieval_profile)
+        + 0.8 * max(0.0, year_alignment_score(row, retrieval_profile))
+        - 3.0 * avoid_penalty_score(row, retrieval_profile)
+        - 2.5 * max(0.0, -year_alignment_score(row, retrieval_profile))
         - _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     )
 
@@ -1053,6 +1193,57 @@ def _candidate_frame(
     return candidates
 
 
+def _year_mask(frame: pd.DataFrame, constraint: dict[str, Any]) -> pd.Series:
+    years = pd.to_numeric(frame["year"], errors="coerce")
+    return years.between(int(constraint["min_year"]), int(constraint["max_year"]), inclusive="both")
+
+
+def apply_year_constraint(
+    candidates: pd.DataFrame,
+    retrieval_profile: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    constraint = retrieval_profile.get("year_constraint")
+    if not constraint:
+        return candidates, retrieval_profile
+
+    profile = dict(retrieval_profile)
+    global_matches = MOVIES[_year_mask(MOVIES, constraint)].copy()
+    global_matches = global_matches[~global_matches["tmdb_id"].isin(profile["history_tmdb_ids"])]
+    global_matches = global_matches[~global_matches["title"].isin(profile["history_titles"])]
+    if profile.get("exclude_seed_tmdb_ids"):
+        global_matches = global_matches[~global_matches["tmdb_id"].isin(profile["exclude_seed_tmdb_ids"])]
+    if profile["hard_block_genres"]:
+        global_matches = global_matches[~global_matches["genres_set"].map(lambda genres: bool(genres.intersection(profile["hard_block_genres"])))]
+
+    if global_matches.empty:
+        label = constraint.get("label", "requested year range")
+        profile["year_constraint_unavailable"] = True
+        profile["candidate_constraint_note"] = (
+            f"No movies in the local dataset match the requested era ({label}). "
+            "Choose the closest available candidate and briefly acknowledge that limitation."
+        )
+        return candidates, profile
+
+    if candidates.empty:
+        candidates = global_matches.copy()
+        candidates["fts_score"] = 0.0
+        candidates["semantic_score"] = 0.0
+    else:
+        existing_ids = set(candidates["tmdb_id"].astype(int))
+        missing_year_matches = global_matches[~global_matches["tmdb_id"].isin(existing_ids)].copy()
+        if not missing_year_matches.empty:
+            missing_year_matches["fts_score"] = 0.0
+            missing_year_matches["semantic_score"] = 0.0
+            missing_year_matches["second_stage_score"] = missing_year_matches.apply(local_fallback_score, axis=1, retrieval_profile=profile)
+            missing_year_matches = missing_year_matches.sort_values(["second_stage_score", "vote_average", "vote_count"], ascending=False).head(20)
+            candidates = pd.concat([candidates, missing_year_matches], ignore_index=False).drop_duplicates(subset=["tmdb_id"], keep="first")
+
+    constrained = candidates[_year_mask(candidates, constraint)].copy()
+    if constrained.empty:
+        return candidates, profile
+    return constrained, profile
+
+
 def local_fallback_candidates(preferences: str, history: tuple[tuple[int | None, str], ...]) -> tuple[pd.DataFrame, dict[str, Any]]:
     retrieval_profile = build_retrieval_profile(preferences, history)
     candidates = MOVIES.copy()
@@ -1076,10 +1267,11 @@ def build_candidate_pool(
     exclude_ids = set(retrieval_profile["history_tmdb_ids"])
 
     from fts_retrieval import fts_ready, search_fts
-    from semantic_retrieval import search_semantic, semantic_ready
+    from semantic_retrieval import search_semantic, semantic_runtime_status
 
     lexical_available = mode in {"hybrid", "lexical"} and fts_ready()
-    semantic_available = mode in {"hybrid", "semantic"} and semantic_ready()
+    semantic_status = semantic_runtime_status()
+    semantic_available = mode in {"hybrid", "semantic"} and bool(semantic_status.get("ready"))
     lexical_hits = search_fts(lexical_query_text, exclude_ids=exclude_ids, limit=FTS_LIMIT) if lexical_available else []
     try:
         semantic_hits = search_semantic(semantic_query_text, exclude_ids=exclude_ids, limit=SEMANTIC_LIMIT) if semantic_available else []
@@ -1099,8 +1291,10 @@ def build_candidate_pool(
 
     candidates = _candidate_frame(lexical_hits, semantic_hits, retrieval_profile, resolved_mode)
     candidates = filter_semantic_only_candidates(candidates, retrieval_profile)
+    candidates, retrieval_profile = apply_year_constraint(candidates, retrieval_profile)
     if candidates.empty:
         fallback, fallback_profile = local_fallback_candidates(preferences, history)
+        fallback, fallback_profile = apply_year_constraint(fallback, fallback_profile)
         return fallback, fallback_profile, "local_fallback"
 
     candidates["second_stage_score"] = candidates.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)

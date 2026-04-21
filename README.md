@@ -49,6 +49,7 @@ Environment variables:
 
 - `OLLAMA_API_KEY` required for the final recommendation LLM call
 - `OLLAMA_API_KEY` also powers offline LLM augmentation
+- `HF_TOKEN` required for Hugging Face hosted SentenceTransformer embeddings
 - `TMDB_API_KEY` optional for rebuilding the enriched dataset locally
 
 Set the required key in the same shell before running the API:
@@ -185,7 +186,7 @@ Why this matters:
 
 - Leapcell image builds are resource-constrained.
 - Installing `sentence-transformers` pulls in a much heavier stack and warming the model during build can exceed Leapcell limits.
-- The deployed app can still run without that package: semantic retrieval will simply stay unavailable on Leapcell, and the runtime will fall back to lexical / metadata retrieval plus the final LLM choice.
+- Semantic retrieval now uses Hugging Face hosted SentenceTransformer embeddings. It does not install `sentence-transformers`; query embeddings come from the HF feature-extraction API, while vector search stays local. If that embedding API is unavailable, semantic retrieval fails open and the runtime falls back to lexical / metadata retrieval plus the final LLM choice.
 
 Keep using the full `requirements.txt` for local development and offline artifact generation. The lightweight `requirements-leapcell.txt` exists only for hosted deployment.
 
@@ -268,7 +269,7 @@ The local prep pipeline now has three layers:
    - `keywords_augmented_json`
 3. Retrieval artifact rebuilds for:
    - SQLite FTS
-   - sentence-transformer embeddings
+   - semantic embeddings
 
 The deployed API does not run any of these offline steps at request time.
 
@@ -312,6 +313,26 @@ If the augmentation eventually completes and you want the retrieval stack to use
 python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
 ```
 
+### Semantic embeddings
+
+Semantic retrieval uses Hugging Face hosted SentenceTransformer embedding artifacts. Rebuild them after changing the movie dataset or embedding text recipe:
+
+```bash
+export HF_TOKEN=your_huggingface_token_here
+python -m scripts.text_artifacts --check-embeddings
+python -m scripts.text_artifacts --target embeddings \
+  --embedding-model sentence-transformers/all-MiniLM-L6-v2 \
+  --embedding-dim 384
+```
+
+`HF_TOKEN` must be a Hugging Face token with permission to make Inference Providers calls. You can override the feature-extraction base URL for a dedicated HF endpoint with:
+
+```bash
+export HF_EMBEDDING_BASE_URL=https://your-dedicated-endpoint-base
+```
+
+This rebuilds `data/movie_embeddings.npy`, `data/movie_embedding_ids.json`, and `data/movie_embedding_meta.json` with `embedding_provider: "huggingface"`. Runtime query embeddings must use the same model and dimension as the stored movie vectors.
+
 ## Offline Scripts
 
 Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` already covers the normal end-to-end local prep flow, including rebuilding the text embeddings.
@@ -321,6 +342,7 @@ python -m scripts.tmdb_enrichment
 python -m scripts.llm_augment
 python -m scripts.text_artifacts --target index
 python -m scripts.text_artifacts --target embeddings
+python -m scripts.text_artifacts --target embeddings --embedding-model sentence-transformers/all-MiniLM-L6-v2 --embedding-dim 384
 python -m scripts.prepare_local_runtime
 python -m scripts.benchmark_recommender
 ```
