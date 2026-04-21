@@ -69,20 +69,19 @@ def _get_client(timeout_seconds: float) -> ollama.Client:
 def _build_intent_prompt(preferences: str) -> str:
     genres_text = ", ".join(KNOWN_GENRES)
     return (
-        "Read the movie request and return only small retrieval hints as JSON.\n"
-        "Return JSON only.\n"
-        "Use these optional keys only when clear: "
-        '{"genres": ["..."], "avoid": ["..."], "named_people": ["..."], '
-        '"release_year": {"min": 1990, "max": 1999, "label": "1990s"}, '
-        '"setting_period": "contemporary setting", "tone": ["tense"], '
-        '"quality_preference": true, "country_or_language": ["Korean"]}\n'
-        "Use release_year only for release-date intent like released, made, from, recent, classic, before, after.\n"
-        "Use setting_period for story-world intent like modern story, set in modern times, period piece, set in the 1990s.\n"
-        "Use tone for fuzzy mood/style words like tense, grounded, thoughtful, feel-good, weird, scary, romantic.\n"
-        "Use quality_preference only when the user asks for high-rated, popular, well-reviewed, acclaimed, or crowd-pleasing movies.\n"
-        "Use country_or_language for country, nationality, or language preferences.\n"
-        'Example: "modern story" -> {"setting_period": "contemporary setting"} with no release_year.\n'
-        f'Allowed genres: {genres_text}\n'
+        "Return JSON only. Extract retrieval hints from this movie request.\n"
+        "Omit unclear fields.\n"
+        'Schema: {"genres":[],"avoid":[],"named_people":[],"release_year":null,'
+        '"setting_period":"","tone":[],"keyword_hints":[],"quality_preference":false,'
+        '"country_or_language":[]}\n'
+        "Rules: release_year=release date only: recent, classic, from 1990s, after 2020; use an object with min/max/label. "
+        "setting_period=story world: modern day, period piece, set in 1990s, dystopian setting. "
+        "keyword_hints=searchable themes implied by the request. "
+        "quality_preference=true only for high-rated/popular/acclaimed/crowd-pleasing. "
+        f"Use only these genres: {genres_text}.\n"
+        'Examples: dystopian setting -> {"setting_period":"dystopian setting","keyword_hints":["dystopia","dystopian future","post-apocalyptic future"]}; '
+        'modern story -> {"setting_period":"contemporary setting"}; '
+        'after 2020 -> {"release_year":{"min":2021,"max":9999,"label":"after 2020"}}.\n'
         f"Request: {preferences}"
     )
 
@@ -114,7 +113,6 @@ def _description_llm_options() -> dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=128)
 def _get_intent_override(preferences: str) -> dict[str, Any]:
     api_key = os.getenv("OLLAMA_API_KEY", "").strip()
     if not api_key or not ENABLE_LLM_INTENT:
@@ -164,6 +162,13 @@ def _get_intent_override(preferences: str) -> dict[str, Any]:
     tone = [" ".join(str(item or "").split()).strip() for item in payload.get("tone", []) if str(item or "").strip()]
     if tone:
         result["tone"] = tone[:4]
+    keyword_hints = [
+        " ".join(str(item or "").split()).strip()
+        for item in payload.get("keyword_hints", [])
+        if str(item or "").strip()
+    ]
+    if keyword_hints:
+        result["keyword_hints"] = keyword_hints[:5]
     if isinstance(payload.get("quality_preference"), bool):
         result["quality_preference"] = bool(payload["quality_preference"])
     country_or_language = [
@@ -318,13 +323,22 @@ def _build_selection_prompt(
         if include_cast and cast:
             parts.append(f"cast: {cast}")
 
-        keywords = _csv_head(movie.get("keywords"), 3)
+        keywords = _csv_head(movie.get("keywords"), 5)
         if keywords:
             parts.append(f"keywords: {keywords}")
 
         country = _csv_head(movie.get("production_countries"), 2)
         if include_country and country:
             parts.append(f"country: {country}")
+
+        try:
+            rating = float(movie.get("vote_average", 0.0))
+            votes = int(float(movie.get("vote_count", 0)))
+        except (TypeError, ValueError):
+            rating = 0.0
+            votes = 0
+        if rating > 0.0 or votes > 0:
+            parts.append(f"quality: {rating:.1f}/10 from {votes:,} votes")
 
         premise = _trim_text(movie.get("overview"), 56) or "clear premise"
         parts.append(f"premise: {premise}")
@@ -347,15 +361,12 @@ def _build_selection_prompt(
         [
             "",
             "Rules:",
-            "- Do not retrieve or invent a different movie.",
-            "- Use the user's request as the source of constraints and preferences.",
-            "- Judge each movie only by the dataset-backed candidate details shown below.",
-            "- If the user references a director or actor, treat matching director/cast details as an important clue.",
-            "- If a year is shown, use it only when the request cares about recency or era.",
-            "- Treat story setting as when/where the story takes place, not as the movie release year.",
-            "- If no candidate fully satisfies a requested constraint, still choose the closest candidate from the list and acknowledge the limitation briefly.",
-            "- Some lower-ranked candidates may be included because they preserve an explicit cast, director, or year match; weigh those hard clues over raw rank.",
-            "- Do not introduce qualities that are not supported by the request or the candidate details.",
+            "- Pick only from the listed candidates; do not invent another movie.",
+            "- Ground every claim in the request and candidate details.",
+            "- Treat explicit director, cast, year, and story-setting clues as hard evidence when shown.",
+            "- Release year matters only for recency/era requests; story setting is separate.",
+            "- Use rating/votes only as tie-breakers, and call a rating high only at 7.2/10 or above.",
+            "- If no candidate fully fits, choose the closest one and briefly acknowledge the limitation.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
             "",
             "Candidates:",
@@ -518,8 +529,10 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool =
             "overview": str(row["overview"])[:220],
             "director": str(row.get("director", "")),
             "top_cast": str(row.get("top_cast", "")),
-            "keywords": ", ".join(sorted(row["keywords_set"])[:5]),
+            "keywords": str(row.get("keywords", "")),
             "production_countries": str(row.get("production_countries", "")),
+            "vote_average": row.get("vote_average", ""),
+            "vote_count": row.get("vote_count", ""),
         }
         if include_year and str(row.get("year", "")).strip():
             movie["year"] = int(row["year"])
@@ -614,7 +627,6 @@ def _remaining_llm_timeout_seconds(started_at: float) -> float:
     return max(0.0, remaining)
 
 
-@lru_cache(maxsize=256)
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
     started_at = time.perf_counter()
     intent_future = None

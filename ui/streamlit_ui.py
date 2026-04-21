@@ -228,6 +228,8 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
                 "tmdb_id": movie["tmdb_id"],
                 "title": movie["title"],
                 "score": movie.get("score"),
+                "rating": movie.get("vote_average"),
+                "votes": movie.get("vote_count"),
                 "semantic": movie.get("semantic_score"),
                 "fts": movie.get("fts_score"),
                 "keywords": movie.get("keyword_alignment_score"),

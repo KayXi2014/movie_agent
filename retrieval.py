@@ -251,6 +251,7 @@ def ensure_dataset_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_text(value: Any) -> str:
     text = str(value or "").strip().lower()
+    text = text.replace("scifi", "science fiction")
     text = text.replace("sci-fi", "science fiction")
     text = text.replace("sci fi", "science fiction")
     return text
@@ -677,6 +678,7 @@ def build_retrieval_profile(
         "year_constraint": year_constraint,
         "setting_period": setting_period,
         "tone": [],
+        "keyword_hints": [],
         "quality_preference": False,
         "country_or_language_signals": country_or_language_signals,
         "year_constraint_unavailable": False,
@@ -750,6 +752,16 @@ def merge_intent_override(retrieval_profile: dict[str, Any], intent_override: di
         for item in merged["tone"]:
             merged["positive_query_tokens"].update(tokenize(item))
 
+    keyword_hints = [
+        " ".join(str(item or "").split()).strip()
+        for item in intent_override.get("keyword_hints", [])
+        if str(item or "").strip()
+    ]
+    if keyword_hints:
+        merged["keyword_hints"] = keyword_hints[:5]
+        for item in merged["keyword_hints"]:
+            merged["positive_query_tokens"].update(tokenize(item))
+
     if isinstance(intent_override.get("quality_preference"), bool):
         merged["quality_preference"] = bool(intent_override["quality_preference"])
 
@@ -767,6 +779,7 @@ def merge_intent_override(retrieval_profile: dict[str, Any], intent_override: di
     semantic_hints = [
         str(merged.get("setting_period", "") or ""),
         " ".join(merged.get("tone", [])),
+        " ".join(merged.get("keyword_hints", [])),
         " ".join(merged.get("country_or_language_signals", [])),
     ]
     semantic_hint_text = " ".join(item for item in semantic_hints if item).strip()
@@ -781,6 +794,7 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
         "tone": list(retrieval_profile.get("tone", []))[:3],
+        "keyword_hints": list(retrieval_profile.get("keyword_hints", []))[:5],
         "avoid": retrieval_profile["negative_phrases"][:6],
         "year_relevant": year_relevant,
         "year_constraint": retrieval_profile.get("year_constraint"),
@@ -824,6 +838,25 @@ def build_confidence_bundle(
     fifth = shortlist[4] if len(shortlist) > 4 else None
     gap1 = float(top["score"]) - float(second["score"]) if second else float(top["score"])
     gap5 = float(top["score"]) - float(fifth["score"]) if fifth else gap1
+    top_rating = float(top.get("vote_average", 0.0) or 0.0)
+    top_votes = int(float(top.get("vote_count", 0) or 0))
+    quality_backups = [
+        item
+        for item in shortlist[1:8]
+        if float(item.get("score", 0.0)) >= float(top["score"]) - 0.16
+        and float(item.get("vote_average", 0.0) or 0.0) >= max(7.2, top_rating + 0.8)
+        and int(float(item.get("vote_count", 0) or 0)) >= max(1000, top_votes * 5)
+    ]
+    top5_quality_alternatives = [
+        item
+        for item in shortlist[1:5]
+        if float(item.get("score", 0.0)) >= float(top["score"]) - 0.16
+        and float(item.get("keyword_alignment_score", 0.0)) >= 0.16
+        and float(item.get("vote_average", 0.0) or 0.0) >= max(6.7, top_rating + 0.6)
+        and int(float(item.get("vote_count", 0) or 0)) >= max(1000, top_votes * 5)
+    ]
+    quality_risk = (top_rating < 6.5 or top_votes < 500) and bool(quality_backups)
+    quality_risk_requires_wide = quality_risk and not top5_quality_alternatives
 
     specificity_points = 0
     specificity_points += 1 if retrieval_profile["explicit_genre_targets"] else 0
@@ -919,6 +952,7 @@ def build_confidence_bundle(
 
     if (
         not contradictions
+        and not quality_risk
         and strong_convergence
         and (
             (specificity == "high" and top_fulfillment == "high" and gap1 >= 0.03)
@@ -939,7 +973,7 @@ def build_confidence_bundle(
         )
     ):
         confidence = "medium"
-        route = "judge_5"
+        route = "judge_8" if quality_risk_requires_wide else "judge_5"
     else:
         confidence = "low"
         route = "judge_8"
@@ -955,6 +989,10 @@ def build_confidence_bundle(
         "contradictions": contradictions,
         "semantic_available": semantic_available,
         "lexical_available": lexical_available,
+        "quality_risk": quality_risk,
+        "quality_risk_requires_wide": quality_risk_requires_wide,
+        "quality_backup_tmdb_ids": [int(item["tmdb_id"]) for item in quality_backups[:3]],
+        "top5_quality_alternative_tmdb_ids": [int(item["tmdb_id"]) for item in top5_quality_alternatives[:3]],
         "top_candidate_tmdb_id": int(top["tmdb_id"]),
     }
 
@@ -982,8 +1020,13 @@ def keyword_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -
         return 0.0
     blob_overlap = len(positive_tokens.intersection(row["search_blob_tokens"]))
     keyword_overlap = len(positive_tokens.intersection(row["keywords_set"]))
-    score = 0.6 * blob_overlap + 0.4 * keyword_overlap
-    return _normalize_component(score, 6.0)
+    hint_phrase_hits = sum(
+        1
+        for hint in retrieval_profile.get("keyword_hints", [])
+        if normalize_text(hint) and normalize_text(hint) in row["search_blob"]
+    )
+    score = 0.5 * blob_overlap + 0.4 * keyword_overlap + 1.2 * hint_phrase_hits
+    return _normalize_component(score, 8.0)
 
 
 def genre_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
@@ -1024,11 +1067,6 @@ def quality_prior_score(row: pd.Series) -> float:
     return 0.65 * rating + 0.35 * votes
 
 
-def novelty_penalty(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    penalty = 4.0 if row["title_root"] and row["title_root"] in retrieval_profile["watched_roots"] else 0.0
-    return penalty
-
-
 def person_anchor_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     signals = retrieval_profile.get("named_person_signals", [])
     if not signals:
@@ -1058,7 +1096,6 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     quality_component = quality_prior_score(row)
     seed_component = _normalize_component(seed_similarity_score(row, retrieval_profile), 8.0)
     avoid_component = avoid_penalty_score(row, retrieval_profile)
-    novelty_component = _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     person_component = person_anchor_score(row, retrieval_profile)
     year_component = year_alignment_score(row, retrieval_profile)
     year_reward = max(0.0, year_component)
@@ -1071,7 +1108,7 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
         semantic_weight = 0.62
         fts_weight = 0.16
         person_weight = 0.0
-    quality_weight = 0.40 if retrieval_profile.get("quality_preference") else 0.13
+    quality_weight = 0.30 if retrieval_profile.get("quality_preference") else 0.15
     return (
         semantic_weight * semantic_component
         + fts_weight * fts_component
@@ -1084,7 +1121,6 @@ def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
         - 0.36 * avoid_component
         - 0.10 * genre_penalty
         - 0.35 * year_penalty
-        - 0.05 * novelty_component
     )
 
 
@@ -1103,7 +1139,6 @@ def local_fallback_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> f
         + 0.8 * max(0.0, year_alignment_score(row, retrieval_profile))
         - 3.0 * avoid_penalty_score(row, retrieval_profile)
         - 2.5 * max(0.0, -year_alignment_score(row, retrieval_profile))
-        - _normalize_component(novelty_penalty(row, retrieval_profile), 4.0)
     )
 
 
@@ -1343,6 +1378,8 @@ def build_shortlist(
                 "score": round(float(row.second_stage_score), 3),
                 "semantic_score": round(float(getattr(row, "semantic_score", 0.0)), 3),
                 "fts_score": round(float(getattr(row, "fts_score", 0.0)), 3),
+                "vote_average": round(float(row.vote_average), 3),
+                "vote_count": int(row.vote_count),
                 **component_scores,
             }
         )
