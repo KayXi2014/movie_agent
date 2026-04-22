@@ -6,6 +6,6 @@
   "row_count": 1000,
   "source_name": "tmdb_top1000_movies_enriched.csv",
   "source_path": "data/tmdb_top1000_movies_enriched.csv",
-  "source_sha256": "0aa732ef33f0cd93f5458bb78cc08cd2ce17c3f4ed12547731a46f3090e2b753",
-  "source_size": 2559468
+  "source_sha256": "16cd1ab67963bd03d3a0a437cc395193d5ca31238b7a1574cdf09589325cee95",
+  "source_size": 2586889
 }

@@ -9,9 +9,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from retrieval import DATA_PATH, EMBEDDING_META_PATH, ENRICHED_DATA_PATH, RETRIEVAL_DB_META_PATH, load_json, metadata_matches
+from retrieval import DATA_PATH, ENRICHED_DATA_PATH
+from scripts.imdb_enrichment import apply_imdb_overlay, imdb_status_summary
 from scripts.llm_augment import augment_dataset, augmentation_status_summary
-from scripts.text_artifacts import refresh_retrieval_artifacts
 from scripts.tmdb_enrichment import build_enriched_dataset, enrichment_status_summary
 
 
@@ -27,27 +27,13 @@ def _active_data_path() -> Path:
     return ENRICHED_DATA_PATH if ENRICHED_DATA_PATH.exists() else DATA_PATH
 
 
-def _artifacts_current() -> bool:
-    active_data_path = _active_data_path()
-    try:
-        retrieval_meta = load_json(RETRIEVAL_DB_META_PATH)
-        embedding_meta = load_json(EMBEDDING_META_PATH)
-    except Exception:
-        return False
-    return (
-        metadata_matches(retrieval_meta, active_data_path)
-        and metadata_matches(embedding_meta, active_data_path)
-        and embedding_meta.get("embedding_provider") == "huggingface"
-    )
-
-
 def prepare_local_runtime(
     *,
     refresh_tmdb: bool = False,
     refresh_augmentation: bool = False,
     skip_tmdb: bool = False,
+    skip_imdb: bool = False,
     skip_augmentation: bool = False,
-    skip_artifacts: bool = False,
     augment_model: str | None = None,
     augment_workers: int | None = None,
     augment_batch_size: int | None = None,
@@ -71,6 +57,20 @@ def prepare_local_runtime(
     else:
         print("TMDB credentials not set. Skipping optional dataset enrichment.")
 
+    if skip_imdb:
+        print("Skipping IMDb ratings overlay by request.")
+    else:
+        imdb_summary = imdb_status_summary(source_path=_active_data_path())
+        if imdb_summary["overlay_rows"] <= 0:
+            print("IMDb ratings overlay is empty or missing. Skipping.")
+        elif imdb_summary["rows_needing_imdb"] > 0:
+            print(f"IMDb ratings overlay pending for {imdb_summary['rows_needing_imdb']} rows. Applying now...")
+            dataset_changed = apply_imdb_overlay(source_path=_active_data_path()) or dataset_changed
+        else:
+            print("IMDb ratings overlay already current. Skipping.")
+            if imdb_summary["overlay_rows_unmatched"] > 0:
+                print(f"Warning: {imdb_summary['overlay_rows_unmatched']} IMDb overlay rows do not match the active dataset.")
+
     if skip_augmentation:
         print("Skipping LLM augmentation by request.")
     elif _augmentation_enabled():
@@ -93,23 +93,11 @@ def prepare_local_runtime(
     else:
         print("OLLAMA_API_KEY not set. Skipping optional LLM augmentation.")
 
-    if skip_artifacts:
-        print("Skipping retrieval artifact rebuild by request.")
-        if dataset_changed:
-            print("Note: dataset changed, so retrieval artifacts may now be stale until you rebuild them.")
-    elif dataset_changed or not _artifacts_current():
-        print("Building retrieval artifacts...")
-        try:
-            refresh_retrieval_artifacts()
-        except PermissionError as exc:
-            raise SystemExit(
-                "Could not rebuild retrieval artifacts because a data file is in use. "
-                "Stop any running API, Streamlit, or SQLite process using data/movies.sqlite and try again."
-            ) from exc
-        except RuntimeError as exc:
-            raise SystemExit(str(exc)) from exc
-    else:
-        print("Retrieval artifacts already current. Skipping rebuild.")
+    if dataset_changed:
+        print(
+            "Dataset changed. Runtime lexical retrieval reads the CSV directly; "
+            "rebuild semantic embeddings separately if you want them to reflect the latest CSV."
+        )
 
     print("Local runtime preparation complete.")
 
@@ -123,8 +111,8 @@ def main() -> None:
         help="Force LLM augmentation even if fields are already populated.",
     )
     parser.add_argument("--skip-tmdb", action="store_true", help="Skip optional TMDB enrichment.")
+    parser.add_argument("--skip-imdb", action="store_true", help="Skip applying data/IMDB_ratings.tsv.")
     parser.add_argument("--skip-augmentation", action="store_true", help="Skip optional LLM augmentation.")
-    parser.add_argument("--skip-artifacts", action="store_true", help="Skip rebuilding SQLite/embedding artifacts.")
     parser.add_argument("--augment-model", default=None, help="Override the Ollama model used for LLM augmentation.")
     parser.add_argument("--augment-workers", type=int, default=None, help="Override parallel workers for LLM augmentation.")
     parser.add_argument("--augment-batch-size", type=int, default=None, help="Override batch size for LLM augmentation saves.")
@@ -134,8 +122,8 @@ def main() -> None:
         refresh_tmdb=args.refresh_tmdb,
         refresh_augmentation=args.refresh_augmentation,
         skip_tmdb=args.skip_tmdb,
+        skip_imdb=args.skip_imdb,
         skip_augmentation=args.skip_augmentation,
-        skip_artifacts=args.skip_artifacts,
         augment_model=args.augment_model,
         augment_workers=args.augment_workers,
         augment_batch_size=args.augment_batch_size,

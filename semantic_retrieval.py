@@ -136,7 +136,7 @@ def _encode_hf_query(query_text: str, model_name: str, expected_dim: int | None)
         _hf_embedding_url(model_name),
         headers={"Authorization": f"Bearer {_hf_token()}"},
         json={"inputs": [query_text], "options": {"wait_for_model": True}},
-        timeout=float(os.getenv("HF_EMBED_TIMEOUT_SECONDS", "20")),
+        timeout=float(os.getenv("HF_SEMANTIC_TIMEOUT_S", os.getenv("HF_EMBED_TIMEOUT_SECONDS", "2.0"))),
     )
     response.raise_for_status()
     query_vector = np.asarray(_extract_hf_embedding(response.json()), dtype=np.float32)

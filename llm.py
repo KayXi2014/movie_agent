@@ -45,17 +45,6 @@ logger = logging.getLogger(__name__)
 INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 KNOWN_GENRES = tuple(sorted({genre.strip() for value in TOP_MOVIES["genres"] for genre in str(value or "").split(",") if genre.strip()}))
 
-try:
-    from semantic_retrieval import warm_semantic_runtime as _warm_semantic_runtime
-except Exception:
-    _warm_semantic_runtime = None
-
-if _warm_semantic_runtime is not None:
-    try:
-        _warm_semantic_runtime()
-    except Exception as exc:
-        logger.warning("Semantic runtime prewarm failed: %r", exc)
-
 
 @lru_cache(maxsize=8)
 def _get_client(timeout_seconds: float) -> ollama.Client:
@@ -72,16 +61,18 @@ def _build_intent_prompt(preferences: str) -> str:
         "Return JSON only. Extract retrieval hints from this movie request.\n"
         "Omit unclear fields.\n"
         'Schema: {"genres":[],"avoid":[],"named_people":[],"release_year":null,'
-        '"setting_period":"","tone":[],"keyword_hints":[],"quality_preference":false,'
+        '"setting_period":"","runtime":null,"tone":[],"keyword_hints":[],"quality_preference":false,'
         '"country_or_language":[]}\n'
         "Rules: release_year=release date only: recent, classic, from 1990s, after 2020; use an object with min/max/label. "
         "setting_period=story world: modern day, period piece, set in 1990s, dystopian setting. "
+        "runtime=movie length only: short, quick, under 90 minutes, over 2 hours; use an object with min/max/label. "
         "keyword_hints=searchable themes implied by the request. "
         "quality_preference=true only for high-rated/popular/acclaimed/crowd-pleasing. "
         f"Use only these genres: {genres_text}.\n"
         'Examples: dystopian setting -> {"setting_period":"dystopian setting","keyword_hints":["dystopia","dystopian future","post-apocalyptic future"]}; '
         'modern story -> {"setting_period":"contemporary setting"}; '
-        'after 2020 -> {"release_year":{"min":2021,"max":9999,"label":"after 2020"}}.\n'
+        'after 2020 -> {"release_year":{"min":2021,"max":9999,"label":"after 2020"}}; '
+        'quick under 90 minutes -> {"runtime":{"max":90,"label":"under 90 minutes"}}.\n'
         f"Request: {preferences}"
     )
 
@@ -159,6 +150,23 @@ def _get_intent_override(preferences: str) -> dict[str, Any]:
     setting_period = " ".join(str(payload.get("setting_period", "") or "").split()).strip()
     if setting_period:
         result["setting_period"] = setting_period[:80]
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        parsed_runtime: dict[str, Any] = {}
+        for source_key, target_key in (("min", "min_runtime"), ("min_runtime", "min_runtime"), ("max", "max_runtime"), ("max_runtime", "max_runtime")):
+            if source_key not in runtime:
+                continue
+            try:
+                parsed_runtime[target_key] = int(float(runtime[source_key]))
+            except (TypeError, ValueError):
+                continue
+        short_requested = bool(runtime.get("short_requested", False))
+        if short_requested and "max_runtime" not in parsed_runtime:
+            parsed_runtime["max_runtime"] = 110
+        if "min_runtime" in parsed_runtime or "max_runtime" in parsed_runtime:
+            parsed_runtime["label"] = str(runtime.get("label") or "runtime request")[:40]
+            parsed_runtime["short_requested"] = short_requested
+            result["runtime"] = parsed_runtime
     tone = [" ".join(str(item or "").split()).strip() for item in payload.get("tone", []) if str(item or "").strip()]
     if tone:
         result["tone"] = tone[:4]
@@ -291,6 +299,26 @@ def _build_selection_prompt(
     include_director = force_include_director or "director" in preference_tokens or "filmmaker" in preference_tokens
     include_cast = force_include_cast or bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
     include_country = force_include_country
+    include_quality = bool(
+        {
+            "acclaimed",
+            "best",
+            "classic",
+            "crowd",
+            "good",
+            "great",
+            "greatest",
+            "high",
+            "highly",
+            "popular",
+            "quality",
+            "rated",
+            "rating",
+            "reviews",
+            "top",
+        }
+        & preference_tokens
+    )
 
     if not include_director:
         include_director = _query_mentions_any([movie.get("director", "") for movie in shortlist])
@@ -331,14 +359,15 @@ def _build_selection_prompt(
         if include_country and country:
             parts.append(f"country: {country}")
 
-        try:
-            rating = float(movie.get("vote_average", 0.0))
-            votes = int(float(movie.get("vote_count", 0)))
-        except (TypeError, ValueError):
-            rating = 0.0
-            votes = 0
-        if rating > 0.0 or votes > 0:
-            parts.append(f"quality: {rating:.1f}/10 from {votes:,} votes")
+        if include_quality:
+            try:
+                rating = float(movie.get("vote_average", 0.0))
+                votes = int(float(movie.get("vote_count", 0)))
+            except (TypeError, ValueError):
+                rating = 0.0
+                votes = 0
+            if rating > 0.0 or votes > 0:
+                parts.append(f"quality: {rating:.1f}/10 from {votes:,} votes")
 
         premise = _trim_text(movie.get("overview"), 56) or "clear premise"
         parts.append(f"premise: {premise}")
@@ -347,8 +376,7 @@ def _build_selection_prompt(
 
     shortlist_text = "\n".join(_fmt(movie) for movie in shortlist)
     sections = [
-        "Choose the single best fit from this retrieved shortlist.",
-        "Your job is to select first, then sell the choice.",
+        "Pick one movie from the shortlist and write a persuasive recommendation.",
         f"Request: {preferences}",
     ]
     if history_hint != "none":
@@ -361,21 +389,16 @@ def _build_selection_prompt(
         [
             "",
             "Rules:",
-            "- Pick only from the listed candidates; do not invent another movie.",
-            "- Ground every claim in the request and candidate details.",
-            "- Treat explicit director, cast, year, and story-setting clues as hard evidence when shown.",
-            "- Release year matters only for recency/era requests; story setting is separate.",
-            "- Use rating/votes only as tie-breakers, and call a rating high only at 7.2/10 or above.",
-            "- If no candidate fully fits, choose the closest one and briefly acknowledge the limitation.",
+            "- Use only listed candidate details; do not invent another movie.",
+            "- Honor explicit director, cast, year, story-setting, and avoid constraints.",
+            "- If no candidate fully fits, pick the closest and briefly acknowledge the gap.",
+            "- Use rating/votes only when shown; call a rating high only at 7.2/10 or above.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
             "",
             "Candidates:",
             shortlist_text,
             "",
-            "Description: be personal and persuasive, but specific to this user.",
-            "Sentence 1 gives a vivid hook.",
-            "Sentence 2 and 3 explain why this fits the user's request right now.",
-            "Address the user directly with personal persuasive tone. No generic hype or critic voice.",
+            "Description: address the user directly; give a vivid hook, then why it fits. No generic hype.",
         ]
     )
     return "\n".join(sections)
@@ -531,8 +554,8 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool =
             "top_cast": str(row.get("top_cast", "")),
             "keywords": str(row.get("keywords", "")),
             "production_countries": str(row.get("production_countries", "")),
-            "vote_average": row.get("vote_average", ""),
-            "vote_count": row.get("vote_count", ""),
+            "vote_average": row.get("effective_rating", row.get("vote_average", "")),
+            "vote_count": row.get("effective_votes", row.get("vote_count", "")),
         }
         if include_year and str(row.get("year", "")).strip():
             movie["year"] = int(row["year"])
@@ -627,17 +650,27 @@ def _remaining_llm_timeout_seconds(started_at: float) -> float:
     return max(0.0, remaining)
 
 
+def _should_wait_for_intent(retrieval_profile: dict[str, Any]) -> bool:
+    confidence = retrieval_profile.get("confidence_bundle", {})
+    return not (
+        confidence.get("confidence") == "high"
+        and confidence.get("top_fulfillment") == "high"
+        and not confidence.get("contradictions")
+    )
+
+
 def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None, str], ...]) -> dict[str, Any]:
     started_at = time.perf_counter()
     intent_future = None
     intent_started = 0.0
+    intent_elapsed = 0.0
     intent_used = False
     if ENABLE_LLM_INTENT:
         intent_started = time.perf_counter()
         intent_future = INTENT_EXECUTOR.submit(_get_intent_override, preferences)
 
     shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(preferences, history)
-    if intent_future is not None:
+    if intent_future is not None and _should_wait_for_intent(retrieval_profile):
         timeout_left = max(0.0, INTENT_LLM_TIMEOUT_S - (time.perf_counter() - intent_started))
         try:
             intent_override = intent_future.result(timeout=timeout_left)
@@ -645,13 +678,17 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
             intent_override = {}
         except Exception:
             intent_override = {}
+        intent_elapsed = time.perf_counter() - intent_started
         if intent_override:
             shortlist_refs, prompt_profile, retrieval_profile = _build_shortlist(
                 preferences,
                 history,
+                mode="lexical",
                 retrieval_profile_override=intent_override,
             )
             intent_used = True
+    elif intent_future is not None:
+        intent_elapsed = time.perf_counter() - intent_started
 
     retrieval_elapsed = time.perf_counter() - started_at
     shortlist = _enrich_shortlist(shortlist_refs, include_year=bool(prompt_profile.get("year_relevant")))
@@ -662,6 +699,8 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
     route = confidence_bundle.get("route", "judge_8")
     confidence = confidence_bundle.get("confidence", "low")
     convergence = confidence_bundle.get("convergence", "weak")
+    semantic_elapsed = float(retrieval_profile.get("semantic_elapsed_s", 0.0) or 0.0)
+    semantic_used = bool(retrieval_profile.get("semantic_active", False))
     llm_shortlist = _route_shortlist(shortlist, route)
     force_include_person_fields = bool(retrieval_profile.get("has_named_person_signal"))
     force_include_country = bool(prompt_profile.get("country_relevant"))
@@ -696,13 +735,16 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
         llm_elapsed = time.perf_counter() - llm_started
         result["used_llm"] = True
         logger.info(
-            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s convergence=%s",
+            "Recommendation metrics: retrieval_s=%.3f intent_s=%.3f semantic_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s semantic_used=%s convergence=%s",
             retrieval_elapsed,
+            intent_elapsed,
+            semantic_elapsed,
             llm_elapsed,
             False,
             route,
             confidence,
             intent_used,
+            semantic_used,
             convergence,
         )
         return result
@@ -729,13 +771,16 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                 )
             )
         logger.info(
-            "Recommendation metrics: retrieval_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s convergence=%s",
+            "Recommendation metrics: retrieval_s=%.3f intent_s=%.3f semantic_s=%.3f llm_s=%.3f fallback_used=%s route=%s confidence=%s intent_used=%s semantic_used=%s convergence=%s",
             retrieval_elapsed,
+            intent_elapsed,
+            semantic_elapsed,
             llm_elapsed,
             True,
             route,
             confidence,
             intent_used,
+            semantic_used,
             convergence,
         )
         best = shortlist[0]

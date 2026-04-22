@@ -9,7 +9,6 @@ agentic-movie-recommender/
   main.py     # FastAPI entrypoint
   llm.py      # final LLM selection flow
   retrieval.py
-  fts_retrieval.py
   semantic_retrieval.py
   scripts/    # local prep, TMDB enrichment, LLM augmentation, and benchmarking commands
   data/       # dataset, retrieval artifacts, eval cases, benchmark outputs
@@ -24,16 +23,18 @@ agentic-movie-recommender/
    - If it times out or returns invalid JSON, it is ignored completely.
    - Set `ENABLE_LLM_INTENT=0` to disable this stage.
 3. `retrieval.py` builds a broad local candidate pool using:
-   - SQLite + FTS5 lexical retrieval
-   - Hugging Face hosted query embeddings against local precomputed movie vectors
-   - literal local constraints such as title/history matches, exact genre aliases, avoid terms, known directors/cast, release-year ranges, and dataset-derived country/language terms
+   - in-memory weighted BM25 lexical retrieval over title, genres, keywords, tags, director/cast, essence, and capped overview terms
+   - a small local concept library in `data/retrieval_concepts.json` for reusable preference phrases like dystopian, feel-good, heist, family watch, and best-of-all-time
+   - optional hosted Hugging Face semantic recall for fuzzy/vibe-style requests only
+   - literal local constraints such as title/history matches, exact genre aliases, avoid terms, known directors/cast, release-year ranges, runtime requests, and dataset-derived country/language terms
    - optional LLM intent hints for fuzzy mood/style, quality preference, and ambiguous setting intent
-   - a hybrid rerank with genre, avoid, person, year, seed-title, rating/vote, FTS, and semantic components
+   - a simplified rerank built from `match_score + quality_score - constraint_penalty`
+   - broad-request quality floors so vague genre requests do not surface obscure low-vote titles unless the match is unusually strong
    - light diversification
 4. `retrieval.py` returns:
    - a shortlist of up to 10 candidates
    - a prompt profile with parsed request signals
-   - a confidence bundle with `confidence`, `route`, `convergence`, `top_fulfillment`, score gaps, and contradiction flags
+   - a confidence bundle with `confidence`, `route`, `convergence`, `top_fulfillment`, score gaps, and binary contradiction flags such as genre, avoid, person, year, runtime, or seed misses
 5. `llm.py` routes the final stage:
    - high confidence: skip judging and ask the LLM to describe the top candidate only
    - medium confidence: ask the LLM to judge the top 5
@@ -57,16 +58,17 @@ Environment variables:
 
 - `OLLAMA_API_KEY` required for the final recommendation LLM call
 - `OLLAMA_API_KEY` also powers offline LLM augmentation
-- `HF_TOKEN` required for Hugging Face hosted SentenceTransformer embeddings
 - `TMDB_API_KEY` optional for rebuilding the enriched dataset locally
+- `HF_TOKEN` optional; only needed when `ENABLE_HF_SEMANTIC_RETRIEVAL=1`
 - `ENABLE_LLM_INTENT` optional; defaults to `1`, set to `0` to disable the short pre-retrieval intent LLM
 - `INTENT_LLM_TIMEOUT_S` optional; defaults to `4.0`
+- `ENABLE_HF_SEMANTIC_RETRIEVAL` optional; defaults to `0`
+- `HF_SEMANTIC_TIMEOUT_S` optional; defaults to `2.0`
 
 Set the required key in the same shell before running the API:
 
 ```bash
 export OLLAMA_API_KEY=your_ollama_api_key_here
-export HF_TOKEN=your_huggingface_token_here
 ```
 
 Optional intent routing controls:
@@ -76,6 +78,18 @@ export INTENT_LLM_TIMEOUT_S=4
 # export ENABLE_LLM_INTENT=0  # disable the intent LLM if needed
 ```
 
+Optional semantic recall controls:
+
+```bash
+export HF_TOKEN=your_huggingface_token_here
+export ENABLE_HF_SEMANTIC_RETRIEVAL=1
+export HF_SEMANTIC_TIMEOUT_S=2
+```
+
+Semantic recall is intentionally narrow: it only runs for fuzzy requests such as “like Dune,” “dystopian sci-fi,” “Tarantino-style,” “vibe,” “feel,” or weak lexical cases. If Hugging Face is unavailable or times out, retrieval continues with weighted BM25.
+
+Runtime constraints are local and literal. Requests like “short,” “quick,” “under 90 minutes,” or “less than 2 hours” prefer matching runtimes, and “short/quick/light” requests exclude movies over 180 minutes when enough candidates remain. Requests like “long,” “epic,” or “over 2 hours” prefer longer movies without hard-failing if the dataset has too few exact matches.
+
 ## Running Locally
 
 ### 1. Prepare local data/artifacts if needed
@@ -84,10 +98,10 @@ This repo already includes the generated retrieval artifacts under `data/`, so t
 
 Run local preparation only when you explicitly want to:
 
-- rebuild SQLite / embedding artifacts
 - refresh TMDB-enriched metadata
+- apply IMDb ratings from `data/IMDB_ratings.tsv`
 - refresh offline LLM augmentation fields
-- recover from stale or mismatched artifact metadata
+- update the CSV before optionally rebuilding hosted-HF movie embeddings
 
 ```bash
 python -m scripts.prepare_local_runtime
@@ -96,24 +110,20 @@ python -m scripts.prepare_local_runtime
 What it does:
 
 - checks whether TMDB enrichment is stale, and only refreshes it if TMDB credentials are set and rows still need enrichment
+- applies `data/IMDB_ratings.tsv` into the active dataset only when IMDb rows differ from the CSV
 - checks whether LLM augmentation is stale, and only refreshes it if `OLLAMA_API_KEY` is set and rows still need augmentation
-- rebuilds the retrieval database and text-embedding artifacts only when the dataset changed or the artifact metadata is stale:
-  - `data/movies.sqlite`
-  - `data/movies.sqlite.meta.json`
-  - `data/movie_embeddings.npy`
-  - `data/movie_embedding_ids.json`
-  - `data/movie_embedding_meta.json`
+- does not rebuild SQLite artifacts; runtime lexical retrieval reads the active CSV directly
 
-By default, `prepare_local_runtime` is idempotent: it skips TMDB enrichment, LLM augmentation, and artifact rebuilds if they are already current.
+By default, `prepare_local_runtime` is idempotent: it skips TMDB enrichment, IMDb overlay, and LLM augmentation if they are already current.
 
 Useful variants:
 
 ```bash
 python -m scripts.prepare_local_runtime --skip-tmdb
+python -m scripts.prepare_local_runtime --skip-imdb
 python -m scripts.prepare_local_runtime --skip-augmentation
 python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
 python -m scripts.prepare_local_runtime --refresh-augmentation
-python -m scripts.prepare_local_runtime --skip-artifacts
 python -m scripts.prepare_local_runtime --augment-workers 2
 python -m scripts.prepare_local_runtime --augment-model gemma4:31b-cloud
 ```
@@ -121,7 +131,11 @@ python -m scripts.prepare_local_runtime --augment-model gemma4:31b-cloud
 Recommended usage patterns:
 
 - normal local API work: do **not** run `prepare_local_runtime`
-- only rebuild retrieval artifacts from the current CSV:
+- check the current CSV without touching optional providers:
+  ```bash
+  python -m scripts.prepare_local_runtime --skip-tmdb --skip-imdb --skip-augmentation
+  ```
+- apply IMDb TSV ratings without touching TMDB or LLM augmentation:
   ```bash
   python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
   ```
@@ -130,7 +144,16 @@ Recommended usage patterns:
   python -m scripts.prepare_local_runtime --skip-tmdb --refresh-augmentation
   ```
 
-You do not need to run `scripts.text_artifacts` separately unless you specifically want those lower-level maintenance commands, and you do not need to rerun `scripts.llm_augment` for already-complete rows because the augmentation script resumes only missing fields.
+You do not need to run `scripts.text_artifacts` separately unless you specifically want to rebuild optional semantic embeddings, and you do not need to rerun `scripts.llm_augment` for already-complete rows because the augmentation script resumes only missing fields.
+
+To rebuild optional Hugging Face semantic embeddings:
+
+```bash
+export HF_TOKEN=your_huggingface_token_here
+python -m scripts.text_artifacts --target embeddings
+```
+
+Do not enable `ENABLE_HF_SEMANTIC_RETRIEVAL=1` in deployment unless the embedding artifacts match the active CSV and `HF_TOKEN` is configured.
 
 If you want TMDB enrichment in that step:
 
@@ -187,9 +210,10 @@ The project is deployable to Leapcell as-is.
 2. In Leapcell, create a new service from that GitHub repo.
 3. If needed, set the service root to this project directory.
 4. Let Leapcell use the root `leapcell.yaml`.
-5. Add the `OLLAMA_API_KEY` and `HF_TOKEN` secrets in Leapcell.
+5. Add the `OLLAMA_API_KEY` secret in Leapcell.
 6. Optional: set `ENABLE_LLM_INTENT=0` if you want hosted requests to skip the short intent LLM stage.
-7. Deploy.
+7. Optional: set `HF_TOKEN` and `ENABLE_HF_SEMANTIC_RETRIEVAL=1` only if you have prebuilt matching HF embedding artifacts and want fuzzy-query semantic recall.
+8. Deploy.
 
 The current `leapcell.yaml`:
 
@@ -205,7 +229,8 @@ Why this matters:
 
 - Leapcell image builds are resource-constrained.
 - Installing `sentence-transformers` pulls in a much heavier stack and warming the model during build can exceed Leapcell limits.
-- Semantic retrieval now uses Hugging Face hosted SentenceTransformer embeddings. It does not install `sentence-transformers`; query embeddings come from the HF feature-extraction API, while vector search stays local. If that embedding API is unavailable, semantic retrieval fails open and the runtime falls back to lexical / metadata retrieval plus the final LLM choice.
+- Runtime retrieval defaults to weighted BM25 lexical scoring and does not load local sentence-transformer models.
+- Optional semantic recall uses hosted Hugging Face query embeddings only when `ENABLE_HF_SEMANTIC_RETRIEVAL=1`; it is disabled by default for predictable hosted latency.
 - The intent LLM uses Ollama cloud and is controlled by `ENABLE_LLM_INTENT`, which defaults to enabled. If it misses its timeout, the request continues with local retrieval only.
 
 Keep using the full `requirements.txt` for local development and offline artifact generation. The lightweight `requirements-leapcell.txt` exists only for hosted deployment.
@@ -278,22 +303,39 @@ The benchmark keeps the existing scoring emphasis:
 
 ## Offline Augmentation
 
-The local prep pipeline now has three layers:
+The local prep pipeline now has three CSV-maintenance layers:
 
 1. TMDB enrichment for factual metadata such as collection info, related titles, alternative titles, spoken languages, and ratings
-2. LLM augmentation for semantic fields such as:
+2. IMDb rating overlay from `data/IMDB_ratings.tsv`
+3. LLM augmentation for semantic fields such as:
    - `essence`
    - `tone_tags_json`
    - `audience_tags_json`
    - `source_tags_json`
    - `keywords_augmented_json`
-3. Retrieval artifact rebuilds for:
-   - SQLite FTS
-   - semantic embeddings
+
+Optional hosted-HF semantic embeddings are rebuilt separately with `scripts.text_artifacts`; SQLite text artifacts are no longer used.
 
 The deployed API does not run any of these offline steps at request time.
 
 The offline augmenter uses Ollama cloud directly. The current default model is `gemma4:31b-cloud`. You can override the model with `--model` or `AUGMENT_MODEL`.
+
+### IMDb ratings
+
+The prep pipeline reads `data/IMDB_ratings.tsv`, which should use the IMDb `title.ratings.tsv` shape:
+
+```tsv
+tconst	averageRating	numVotes
+tt0000001	5.7	2209
+```
+
+It joins `tconst` to the movie dataset's `imdb_id` column, then writes `imdb_rating` and `imdb_votes` into the active movie CSV. Apply it through the normal prep command:
+
+```bash
+python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
+```
+
+The step is idempotent: if the active movie CSV already has those IMDb values, it skips writing. Use `--skip-imdb` when you explicitly want to avoid touching IMDb fields. Manual IMDb override CSVs are not used; update `data/IMDB_ratings.tsv` or the source dataset instead.
 
 ### Run augmentation directly
 
@@ -327,38 +369,20 @@ If you want to avoid rerunning other prep layers while finishing augmentation, u
 python -m scripts.prepare_local_runtime --skip-tmdb --refresh-augmentation --augment-workers 1
 ```
 
-If the augmentation eventually completes and you want the retrieval stack to use the new fields, rebuild artifacts afterward:
+If the augmentation eventually completes and you use optional semantic recall, rebuild embeddings afterward:
 
 ```bash
-python -m scripts.prepare_local_runtime --skip-tmdb --skip-augmentation
-```
-
-### Semantic embeddings
-
-Semantic retrieval uses Hugging Face hosted SentenceTransformer embedding artifacts. Rebuild them after changing the movie dataset or embedding text recipe:
-
-```bash
-export HF_TOKEN=your_huggingface_token_here
-python -m scripts.text_artifacts --check-embeddings
 python -m scripts.text_artifacts --target embeddings
 ```
 
-`HF_TOKEN` must be a Hugging Face token with permission to make Inference Providers calls. You can override the feature-extraction base URL for a dedicated HF endpoint with:
-
-```bash
-export HF_EMBEDDING_BASE_URL=https://your-dedicated-endpoint-base
-```
-
-This rebuilds `data/movie_embeddings.npy`, `data/movie_embedding_ids.json`, and `data/movie_embedding_meta.json` with `embedding_provider: "huggingface"`. Runtime query embeddings must use the same model and dimension as the stored movie vectors.
-
 ## Offline Scripts
 
-Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` already covers the normal end-to-end local prep flow, including rebuilding the text embeddings.
+Useful maintenance commands. These are optional standalone helpers; `python -m scripts.prepare_local_runtime` covers CSV prep, and runtime lexical retrieval is in-memory weighted BM25 over the active CSV.
 
 ```bash
 python -m scripts.tmdb_enrichment
+python -m scripts.imdb_enrichment
 python -m scripts.llm_augment
-python -m scripts.text_artifacts --target index
 python -m scripts.text_artifacts --target embeddings
 python -m scripts.prepare_local_runtime
 python -m scripts.benchmark_recommender
@@ -372,5 +396,8 @@ python -m scripts.benchmark_recommender
 - The Streamlit app is for local inspection only; it is not part of the production deployment.
 - Watch history is used primarily for exclusion and anti-repeat behavior, not as guaranteed taste evidence.
 - Retrieval uses a short pre-retrieval intent LLM by default; set `ENABLE_LLM_INTENT=0` if you want the only live model call in the request path to be the final recommendation-selection/description call.
+- Optional semantic recall is disabled by default; enable it with `ENABLE_HF_SEMANTIC_RETRIEVAL=1` only when `HF_TOKEN` and matching `data/movie_embeddings.npy` artifacts are available.
+- Add or refresh IMDb quality data in `data/IMDB_ratings.tsv`; when present, IMDb rating/vote fields become the preferred quality signal, with TMDB as fallback.
+- Semantic embeddings intentionally use compact factual text only: tone/audience/source tags, TMDB keywords, genres, overview, and tagline. LLM-generated `essence` and augmented keywords are kept out of embedding text because they can be verbose or inferred enough to confuse dense semantic recall.
 - `scripts.prepare_local_runtime` is a maintenance command, not a normal startup step.
 - Offline LLM augmentation is the slowest and least reliable prep layer; expect long runtimes and occasional provider errors, and rely on resumable reruns rather than assuming one pass will always finish cleanly.

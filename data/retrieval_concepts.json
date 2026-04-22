@@ -1,0 +1,51 @@
+{
+  "dystopian_future": {
+    "aliases": ["dystopian", "dystopia", "dystopian setting", "bleak future", "post-apocalyptic", "post apocalyptic"],
+    "boost_terms": ["dystopia", "dystopian future", "post-apocalyptic future", "survival", "oppressive society"]
+  },
+  "feel_good": {
+    "aliases": ["feel-good", "feel good", "uplifting", "heartwarming", "comfort watch", "comfort movie"],
+    "boost_terms": ["uplifting", "heartwarming", "friendship", "family", "warm", "lighthearted"]
+  },
+  "date_night": {
+    "aliases": ["date night", "date movie", "with my partner", "romantic night"],
+    "boost_terms": ["romance", "charming", "warm", "intimate", "relationship"]
+  },
+  "family_watch": {
+    "aliases": ["with family", "family watch", "family movie", "for kids", "kid friendly", "kids"],
+    "boost_terms": ["family", "warm", "friendship", "adventure", "uplifting"]
+  },
+  "crime_mob": {
+    "aliases": ["gangster", "mob", "mafia", "organized crime", "crime boss", "mobster"],
+    "boost_terms": ["gangster", "mafia", "mobster", "organized crime", "crime boss", "underworld"]
+  },
+  "heist": {
+    "aliases": ["heist", "robbery", "caper", "thieves", "thief"],
+    "boost_terms": ["heist", "robbery", "thief", "caper", "crew", "police chase"]
+  },
+  "grounded_scifi": {
+    "aliases": ["grounded sci-fi", "grounded science fiction", "realistic sci-fi", "realistic science fiction", "hard sci-fi", "hard science fiction"],
+    "boost_terms": ["science fiction", "space", "future", "nasa", "artificial intelligence", "scientific"]
+  },
+  "space_epic": {
+    "aliases": ["space epic", "sci-fi epic", "science fiction epic", "space opera", "space adventure"],
+    "boost_terms": ["space", "space travel", "space opera", "planet", "galaxy", "epic scale"]
+  },
+  "slow_burn": {
+    "aliases": ["slow burn", "slow-burn", "deliberate pacing", "patient thriller"],
+    "boost_terms": ["slow burn", "psychological", "tension", "atmospheric", "suspense"]
+  },
+  "psychological_thriller": {
+    "aliases": ["psychological thriller", "mind game", "mind games", "paranoid thriller", "unsettling thriller"],
+    "boost_terms": ["psychological thriller", "paranoia", "mystery", "suspense", "unsettling"]
+  },
+  "tarantino_style": {
+    "aliases": ["tarantino", "quentin tarantino", "tarantino-style", "tarantino style"],
+    "boost_terms": ["crime", "dark comedy", "stylized violence", "sharp dialogue", "nonlinear", "revenge"]
+  },
+  "best_all_time": {
+    "aliases": ["best of all time", "greatest of all time", "all-time best", "all time best", "must watch", "classic masterpiece"],
+    "boost_terms": [],
+    "quality_preference": true
+  }
+}

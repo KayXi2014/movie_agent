@@ -27,20 +27,17 @@ st.set_page_config(page_title="Movie Recommender UI", page_icon="🎬", layout="
 
 DEBUG_MODE_OPTIONS = {
     "Auto (recommended)": "auto",
-    "Lexical only": "lexical",
-    "Full local pipeline": "hybrid",
+    "Weighted BM25 lexical": "lexical",
 }
 ROUTE_LABELS = {
     "description_only": "High confidence: describe top pick only",
     "judge_5": "Medium confidence: judge top 5",
     "judge_8": "Low confidence: judge top 8",
-    "judge_10": "Low confidence: judge top 10",
 }
 ROUTE_SHORTLIST_LIMITS = {
     "description_only": 1,
     "judge_5": 5,
     "judge_8": 8,
-    "judge_10": 10,
 }
 
 
@@ -100,42 +97,15 @@ def render_result(data: dict[str, Any], elapsed: float, source_label: str) -> No
 
 
 def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
-    import semantic_retrieval as sr
-
     normalized_history = normalize_history(payload["history"])
-    semantic_status_fn = getattr(sr, "semantic_runtime_status", None)
-    if callable(semantic_status_fn):
-        semantic_status = semantic_status_fn()
-    else:
-        semantic_status = {
-            "ready": bool(getattr(sr, "semantic_ready", lambda: False)()),
-            "reason": "legacy_module_without_status",
-            "model_name": None,
-        }
     requested_mode = DEBUG_MODE_OPTIONS.get(debug_mode, "auto")
-    if requested_mode == "auto":
-        requested_mode = "hybrid" if semantic_status["ready"] else "lexical"
 
-    try:
-        shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
-            payload["preferences"],
-            normalized_history,
-            mode=requested_mode,
-        )
-        effective_mode = requested_mode
-    except ModuleNotFoundError as exc:
-        if requested_mode != "hybrid":
-            raise
-        shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
-            payload["preferences"],
-            normalized_history,
-            mode="lexical",
-        )
-        effective_mode = "lexical"
-        st.info(
-            "Local semantic debug is unavailable in this environment "
-            f"({exc}). Showing lexical-only debug instead."
-        )
+    shortlist_refs, prompt_profile, retrieval_profile = build_shortlist(
+        payload["preferences"],
+        normalized_history,
+        mode=requested_mode,
+    )
+    effective_mode = requested_mode
 
     st.markdown("### Retrieval Debug")
     confidence_bundle = retrieval_profile.get("confidence_bundle", {})
@@ -149,6 +119,7 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
         f"Retrieval mode: {retrieval_profile.get('retrieval_mode', 'unknown')} | "
         f"Candidates shown: {len(shortlist_refs)} | "
         f"Final LLM candidates: {routed_limit} | "
+        f"BM25 hits: {retrieval_profile.get('lexical_hit_count', 0)} | "
         f"Semantic hits: {retrieval_profile.get('semantic_hit_count', 0)}"
     )
 
@@ -159,14 +130,10 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
     metric_cols[3].metric("LLM shortlist", routed_limit)
     st.caption(ROUTE_LABELS.get(route, "Adaptive route selected by retrieval confidence."))
 
-    if effective_mode == "lexical":
-        if semantic_status["ready"]:
-            st.info("Semantic retrieval is available in this environment, but debug is currently running in lexical-only mode.")
-        else:
-            st.info(
-                "Semantic retrieval is unavailable in this Streamlit process, so semantic scores will stay at 0. "
-                f"Reason: {semantic_status['reason']}."
-            )
+    if retrieval_profile.get("semantic_enabled"):
+        st.info("Semantic recall is enabled and only runs for fuzzy/vibe-style requests. If it fails or times out, BM25 lexical retrieval continues.")
+    else:
+        st.info("Semantic recall is disabled. Retrieval debug is using weighted BM25 lexical scoring plus quality-aware reranking.")
 
     debug_summary = {
         "target_genres": prompt_profile.get("target_genres", []),
@@ -175,6 +142,8 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
         "setting_period": prompt_profile.get("setting_period", ""),
         "year_constraint": prompt_profile.get("year_constraint"),
         "year_constraint_unavailable": prompt_profile.get("year_constraint_unavailable", False),
+        "runtime_constraint": prompt_profile.get("runtime_constraint"),
+        "runtime_constraint_unavailable": prompt_profile.get("runtime_constraint_unavailable", False),
         "country_relevant": prompt_profile.get("country_relevant", False),
         "quality_preference": retrieval_profile.get("quality_preference", False),
         "country_or_language_signals": retrieval_profile.get("country_or_language_signals", []),
@@ -200,20 +169,15 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
             "gap1",
             "gap5",
             "contradictions",
-            "semantic_available",
             "lexical_available",
+            "semantic_available",
+            "semantic_active",
             "top_candidate_tmdb_id",
         )
         if key in confidence_bundle
     }
     if confidence_summary:
         st.code(json.dumps(confidence_summary, indent=2), language="json")
-
-    if prompt_profile.get("preferred_themes"):
-        debug_summary = {
-            "preferred_themes": prompt_profile.get("preferred_themes", []),
-        }
-        st.code(json.dumps(debug_summary, indent=2), language="json")
 
     st.markdown("#### Retrieval Shortlist")
     st.caption(
@@ -230,14 +194,21 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
                 "score": movie.get("score"),
                 "rating": movie.get("vote_average"),
                 "votes": movie.get("vote_count"),
+                "effective_rating": movie.get("effective_rating"),
+                "effective_votes": movie.get("effective_votes"),
+                "retrieval_vote": movie.get("retrieval_vote_score"),
+                "bm25": movie.get("bm25_score"),
                 "semantic": movie.get("semantic_score"),
-                "fts": movie.get("fts_score"),
-                "keywords": movie.get("keyword_alignment_score"),
-                "genres": movie.get("genre_alignment_score"),
-                "avoid": movie.get("avoid_penalty_score"),
-                "person": movie.get("person_anchor_score"),
-                "year": movie.get("year_alignment_score"),
-                "seed": movie.get("seed_similarity_score"),
+                "match": movie.get("match_score"),
+                "quality": movie.get("quality_score"),
+                "constraint_penalty": movie.get("constraint_penalty"),
+                "runtime_alignment": movie.get("runtime_alignment"),
+                "genre_match": movie.get("genre_match"),
+                "avoid_hit": movie.get("avoid_hit"),
+                "person_match": movie.get("person_match"),
+                "year_match": movie.get("year_match"),
+                "runtime_match": movie.get("runtime_match"),
+                "seed_match": movie.get("seed_match"),
             }
         )
 
@@ -257,7 +228,7 @@ with st.sidebar:
         options=list(DEBUG_MODE_OPTIONS),
         index=0,
         disabled=not show_local_debug,
-        help="Auto uses semantic retrieval when Hugging Face embedding artifacts and HF_TOKEN are available.",
+        help="Auto uses BM25 and may add semantic recall only when the HF semantic flag is enabled and the request is fuzzy.",
     )
 
 st.subheader("User Inputs")
