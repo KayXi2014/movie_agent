@@ -29,6 +29,62 @@ DEFAULT_INPUT_CSV = DATA_DIR / "movie_recommender_test_prompts.csv"
 DEFAULT_OUTPUT_CSV = DATA_DIR / "movie_recommender_test_outputs_direct.csv"
 
 
+def _empty_trace() -> dict[str, Any]:
+    return {
+        "intent_enabled": bool(llm.ENABLE_LLM_INTENT),
+        "intent_used": False,
+        "intent_override_keys": "",
+        "semantic_enabled": False,
+        "semantic_available": False,
+        "semantic_used": False,
+        "semantic_hit_count": 0,
+        "semantic_elapsed_s": 0.0,
+        "retrieval_mode": "",
+        "route": "",
+        "confidence": "",
+        "convergence": "",
+    }
+
+
+def _capture_profile(trace: dict[str, Any], retrieval_profile: dict[str, Any]) -> None:
+    confidence_bundle = retrieval_profile.get("confidence_bundle", {})
+    trace.update(
+        {
+            "semantic_enabled": bool(retrieval_profile.get("semantic_enabled", False)),
+            "semantic_available": bool(retrieval_profile.get("semantic_available", False)),
+            "semantic_used": bool(retrieval_profile.get("semantic_active", False)),
+            "semantic_hit_count": int(retrieval_profile.get("semantic_hit_count", 0) or 0),
+            "semantic_elapsed_s": float(retrieval_profile.get("semantic_elapsed_s", 0.0) or 0.0),
+            "retrieval_mode": str(retrieval_profile.get("retrieval_mode", "")),
+            "route": str(confidence_bundle.get("route", "")),
+            "confidence": str(confidence_bundle.get("confidence", "")),
+            "convergence": str(confidence_bundle.get("convergence", "")),
+        }
+    )
+
+
+def _get_recommendation_with_trace(prompt: str, history: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the recommender and capture internal routing without changing API output."""
+    trace = _empty_trace()
+    original_build_shortlist = llm._build_shortlist
+
+    def traced_build_shortlist(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        override = kwargs.get("retrieval_profile_override")
+        if override:
+            trace["intent_used"] = True
+            trace["intent_override_keys"] = ",".join(sorted(str(key) for key in override.keys()))
+        shortlist_refs, prompt_profile, retrieval_profile = original_build_shortlist(*args, **kwargs)
+        _capture_profile(trace, retrieval_profile)
+        return shortlist_refs, prompt_profile, retrieval_profile
+
+    llm._build_shortlist = traced_build_shortlist
+    try:
+        result = llm.get_recommendation(prompt, history)
+    finally:
+        llm._build_shortlist = original_build_shortlist
+    return result, trace
+
+
 def _lookup_title(tmdb_id: Any) -> str:
     try:
         movie_id = int(tmdb_id)
@@ -97,9 +153,10 @@ def run_case(case_index: int, row: pd.Series) -> dict[str, Any]:
     result: dict[str, Any] = {}
 
     try:
-        result = llm.get_recommendation(prompt, history)
+        result, trace = _get_recommendation_with_trace(prompt, history)
     except Exception as exc:
         error = repr(exc)
+        trace = _empty_trace()
 
     runtime_s = round(time.perf_counter() - started_at, 3)
     output_tmdb_id = result.get("tmdb_id", "") if isinstance(result, dict) else ""
@@ -114,6 +171,18 @@ def run_case(case_index: int, row: pd.Series) -> dict[str, Any]:
         "movie_title": movie_title,
         "recommendation_message": result.get("description", "") if isinstance(result, dict) else "",
         "used_llm": result.get("used_llm", "") if isinstance(result, dict) else "",
+        "intent_enabled": trace["intent_enabled"],
+        "intent_used": trace["intent_used"],
+        "intent_override_keys": trace["intent_override_keys"],
+        "semantic_enabled": trace["semantic_enabled"],
+        "semantic_available": trace["semantic_available"],
+        "semantic_used": trace["semantic_used"],
+        "semantic_hit_count": trace["semantic_hit_count"],
+        "semantic_elapsed_s": round(float(trace["semantic_elapsed_s"]), 3),
+        "retrieval_mode": trace["retrieval_mode"],
+        "route": trace["route"],
+        "confidence": trace["confidence"],
+        "convergence": trace["convergence"],
         "runtime_s": runtime_s,
         "history_repeat": _history_repeat(result, movie_title, history) if isinstance(result, dict) else False,
         "error": error,
@@ -133,6 +202,9 @@ def run_benchmark(input_csv: Path, output_csv: Path) -> pd.DataFrame:
             f"[{case_index + 1}/{len(cases)}] "
             f"{output_row['runtime_s']:.3f}s "
             f"used_llm={output_row['used_llm']} "
+            f"intent_used={output_row['intent_used']} "
+            f"semantic_used={output_row['semantic_used']} "
+            f"route={output_row['route']} "
             f"title={output_row['movie_title'] or '<none>'} "
             f"history_repeat={output_row['history_repeat']} "
             f"error={str(output_row['error'])[:80]}",
@@ -162,6 +234,10 @@ def main() -> None:
                 "case_index",
                 "movie_title",
                 "used_llm",
+                "intent_used",
+                "semantic_used",
+                "route",
+                "confidence",
                 "runtime_s",
                 "history_repeat",
                 "error",

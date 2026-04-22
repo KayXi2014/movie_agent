@@ -133,7 +133,7 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
     if retrieval_profile.get("semantic_enabled"):
         st.info("Semantic recall is enabled and only runs for fuzzy/vibe-style requests. If it fails or times out, BM25 lexical retrieval continues.")
     else:
-        st.info("Semantic recall is disabled. Retrieval debug is using weighted BM25 lexical scoring plus quality-aware reranking.")
+        st.info("Semantic recall is disabled. Retrieval debug is using weighted BM25 candidate generation plus quality stabilization.")
 
     debug_summary = {
         "target_genres": prompt_profile.get("target_genres", []),
@@ -197,12 +197,13 @@ def render_shortlist_debug(payload: dict[str, Any], debug_mode: str) -> None:
                 "effective_rating": movie.get("effective_rating"),
                 "effective_votes": movie.get("effective_votes"),
                 "retrieval_vote": movie.get("retrieval_vote_score"),
+                "source_score": movie.get("source_score"),
                 "bm25": movie.get("bm25_score"),
+                "bm25_rank": movie.get("bm25_rank"),
                 "semantic": movie.get("semantic_score"),
-                "match": movie.get("match_score"),
-                "quality": movie.get("quality_score"),
-                "constraint_penalty": movie.get("constraint_penalty"),
-                "runtime_alignment": movie.get("runtime_alignment"),
+                "semantic_rank": movie.get("semantic_rank"),
+                "seed_relation": movie.get("seed_relation"),
+                "constraint_source": movie.get("constraint_source"),
                 "genre_match": movie.get("genre_match"),
                 "avoid_hit": movie.get("avoid_hit"),
                 "person_match": movie.get("person_match"),

@@ -24,11 +24,10 @@ agentic-movie-recommender/
    - Set `ENABLE_LLM_INTENT=0` to disable this stage.
 3. `retrieval.py` builds a broad local candidate pool using:
    - in-memory weighted BM25 lexical retrieval over title, genres, keywords, tags, director/cast, essence, and capped overview terms
-   - a small local concept library in `data/retrieval_concepts.json` for reusable preference phrases like dystopian, feel-good, heist, family watch, and best-of-all-time
    - optional hosted Hugging Face semantic recall for fuzzy/vibe-style requests only
    - literal local constraints such as title/history matches, exact genre aliases, avoid terms, known directors/cast, release-year ranges, runtime requests, and dataset-derived country/language terms
    - optional LLM intent hints for fuzzy mood/style, quality preference, and ambiguous setting intent
-   - a simplified rerank built from `match_score + quality_score - constraint_penalty`
+   - simple rank fusion from BM25, optional semantic recall, seed-title related IDs, constraint-preserved candidates, and IMDb-backed quality stabilization
    - broad-request quality floors so vague genre requests do not surface obscure low-vote titles unless the match is unusually strong
    - light diversification
 4. `retrieval.py` returns:
@@ -193,6 +192,34 @@ The Streamlit app is a local debugging tool for sending API requests and inspect
 ```bash
 streamlit run ui/streamlit_ui.py
 ```
+
+### 5. Use `llm.py` directly without the API
+
+You can call the recommendation agent directly when you do not need FastAPI, HTTP, or JSON request handling. This is useful for notebooks, scripts, quick local experiments, and competition benchmarks.
+
+Interactive mode:
+
+```bash
+export OLLAMA_API_KEY=your_ollama_api_key_here
+python llm.py
+```
+
+Programmatic use:
+
+```python
+from llm import get_recommendation
+
+result = get_recommendation(
+    "Recommend a fast-paced movie for someone who dislikes slow films",
+    ["The Dark Knight Rises"],
+)
+
+print(result["tmdb_id"])
+print(result["description"])
+print(result["used_llm"])
+```
+
+`get_recommendation(preferences, history)` returns the same core output shape used by the API: `tmdb_id`, `description`, and `used_llm`. The `history` argument can be a list of movie titles; IDs are not required. This direct path still uses the same retrieval, optional intent LLM, final LLM, and deterministic fallback logic as the API.
 
 ## Deployment To Leapcell
 

@@ -1,3 +1,0 @@
-agent,cases,avg_score,avg_runtime,hard_constraint_pass_rate,timeout_rate,seen_repeat_rate,tmdb_on_list_rate,invalid_json_rate,constraint_pass_rate,avg_vote_average,avg_history_signal_hits,avg_persuadability_score,avg_movie_distinction_score,avg_history_max_similarity,used_llm_rate,error_rate,unique_titles,pairwise_wins,pairwise_losses,pairwise_ties
-baseline,12,3.62,6.473,0.917,0.0,0.0,0.917,0.0,0.917,7.39,0.25,3.91,0.75,0.146,0.917,0.083,5,1,11,0
-improved,12,18.86,5.151,1.0,0.0,0.0,1.0,0.0,1.0,7.05,0.42,5.72,0.61,0.097,1.0,0.0,12,11,1,0

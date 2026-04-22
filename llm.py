@@ -299,26 +299,7 @@ def _build_selection_prompt(
     include_director = force_include_director or "director" in preference_tokens or "filmmaker" in preference_tokens
     include_cast = force_include_cast or bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
     include_country = force_include_country
-    include_quality = bool(
-        {
-            "acclaimed",
-            "best",
-            "classic",
-            "crowd",
-            "good",
-            "great",
-            "greatest",
-            "high",
-            "highly",
-            "popular",
-            "quality",
-            "rated",
-            "rating",
-            "reviews",
-            "top",
-        }
-        & preference_tokens
-    )
+    include_quality = True
 
     if not include_director:
         include_director = _query_mentions_any([movie.get("director", "") for movie in shortlist])
@@ -392,7 +373,8 @@ def _build_selection_prompt(
             "- Use only listed candidate details; do not invent another movie.",
             "- Honor explicit director, cast, year, story-setting, and avoid constraints.",
             "- If no candidate fully fits, pick the closest and briefly acknowledge the gap.",
-            "- Use rating/votes only when shown; call a rating high only at 7.2/10 or above.",
+            "- Use rating/votes as quality evidence; when fit is similar, prefer stronger rating/vote support.",
+            "- Call a rating high only at 7.2/10 or above.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
             "",
             "Candidates:",
@@ -501,18 +483,31 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
             return f"{cleaned[0]} and {cleaned[1]}"
         return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
 
+    def _quality_phrase() -> str:
+        try:
+            rating = float(movie.get("vote_average", 0.0) or 0.0)
+            votes = int(float(movie.get("vote_count", 0) or 0))
+        except (TypeError, ValueError):
+            rating = 0.0
+            votes = 0
+        if rating >= 7.2 and votes >= 1000:
+            return f"It also has solid audience backing at {rating:.1f}/10 from {votes:,} votes."
+        if rating > 0.0 and votes > 0:
+            return f"Its rating is more modest at {rating:.1f}/10, so I would treat it as the closest available fit rather than a slam-dunk."
+        return "The available rating data is thin here, so I would treat it as a closest-fit backup rather than a confident quality pick."
+
     if overview:
-        hook = _trim_sentence(overview)
+        hook = f'{movie["title"]} gives you this hook: {_trim_sentence(overview)}'
     elif keywords:
         lead_keywords = _natural_list(keywords[:3])
         hook = f'{movie["title"]} leans into {lead_keywords} with a setup that is easy to picture right away.'
     else:
         hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
 
-    support_line = ""
+    support_line = _quality_phrase()
     if keywords:
         lead_keywords = _natural_list(keywords[:3])
-        support_line = f"It leans into {lead_keywords}, which helps give it a more specific identity than a generic fallback pick."
+        support_line = f"{support_line} It leans into {lead_keywords}, which gives it a clearer identity than a generic backup pick."
 
     tones = prompt_profile.get("tone", [])
     if tones:
@@ -533,7 +528,47 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
     if support_line:
         parts.append(support_line)
     parts.append(fit_line)
-    return " ".join(parts)[:500]
+    description = " ".join(parts)
+    if len(description) <= 500:
+        return description
+    clipped = description[:500].rstrip()
+    sentence_end = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
+    if sentence_end >= 260:
+        return clipped[: sentence_end + 1]
+    return clipped.rsplit(" ", 1)[0].rstrip(" ,.;:") + "."
+
+
+def _safe_fallback_movie(shortlist: list[dict[str, Any]]) -> dict[str, Any]:
+    def _quality(movie: dict[str, Any]) -> tuple[float, int]:
+        try:
+            rating = float(movie.get("vote_average", 0.0) or 0.0)
+            votes = int(float(movie.get("vote_count", 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0, 0
+        return rating, votes
+
+    viable = [
+        movie
+        for movie in shortlist
+        if not bool(movie.get("avoid_hit", False))
+        and bool(movie.get("genre_match", True))
+        and bool(movie.get("person_match", True))
+        and bool(movie.get("year_match", True))
+        and bool(movie.get("runtime_match", True))
+        and bool(movie.get("seed_match", True))
+    ]
+    if not viable:
+        viable = [movie for movie in shortlist if not bool(movie.get("avoid_hit", False))] or shortlist
+
+    reasonable = [movie for movie in viable if (lambda q: q[0] >= 6.2 and q[1] >= 1000)(_quality(movie))]
+    if reasonable:
+        return max(reasonable, key=lambda movie: (_quality(movie)[0], _quality(movie)[1]))
+
+    nonzero = [movie for movie in viable if (lambda q: q[0] > 0.0 and q[1] > 0)(_quality(movie))]
+    if nonzero:
+        return max(nonzero, key=lambda movie: (_quality(movie)[0], _quality(movie)[1]))
+
+    return shortlist[0]
 
 
 def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool = False) -> list[dict[str, Any]]:
@@ -557,6 +592,9 @@ def _enrich_shortlist(shortlist_refs: list[dict[str, Any]], include_year: bool =
             "vote_average": row.get("effective_rating", row.get("vote_average", "")),
             "vote_count": row.get("effective_votes", row.get("vote_count", "")),
         }
+        for key in ("genre_match", "avoid_hit", "person_match", "year_match", "runtime_match", "seed_match"):
+            if key in ref:
+                movie[key] = ref[key]
         if include_year and str(row.get("year", "")).strip():
             movie["year"] = int(row["year"])
         enriched.append(movie)
@@ -783,7 +821,7 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
             semantic_used,
             convergence,
         )
-        best = shortlist[0]
+        best = _safe_fallback_movie(shortlist)
         return {
             "tmdb_id": best["tmdb_id"],
             "description": _fallback_description(best, prompt_profile),

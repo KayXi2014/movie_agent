@@ -33,7 +33,6 @@ ACTIVE_DATA_PATH = ENRICHED_DATA_PATH if ENRICHED_DATA_PATH.exists() else DATA_P
 EMBEDDINGS_PATH = DATA_DIR / "movie_embeddings.npy"
 EMBEDDING_IDS_PATH = DATA_DIR / "movie_embedding_ids.json"
 EMBEDDING_META_PATH = DATA_DIR / "movie_embedding_meta.json"
-RETRIEVAL_CONCEPTS_PATH = DATA_DIR / "retrieval_concepts.json"
 
 TEXT_COLUMNS = [
     "title",
@@ -83,7 +82,7 @@ OPTIONAL_DATA_COLUMNS = [
     *LLM_AUGMENTATION_TEXT_COLUMNS,
 ]
 QUALITY_PREFERENCE_RE = re.compile(
-    r"\b(?:good|great|best|top|high[-\s]?rated|highly rated|acclaimed|popular|crowd[-\s]?pleasing|well reviewed|must[-\s]?watch|greatest|masterpiece)\b",
+    r"\b(?:good|great|best|top|high[-\s]?quality|high[-\s]?rated|highly rated|acclaimed|popular|crowd[-\s]?pleasing|well reviewed|must[-\s]?watch|greatest|masterpiece)\b",
     re.IGNORECASE,
 )
 QUALITY_PHRASE_RE = re.compile(
@@ -95,10 +94,15 @@ QUALITY_QUERY_FILLER_TOKENS = {
     "best",
     "ever",
     "favorite",
+    "good",
     "great",
     "greatest",
+    "high",
+    "highly",
     "masterpiece",
     "must",
+    "popular",
+    "acclaimed",
     "rated",
     "rating",
     "time",
@@ -109,16 +113,31 @@ REQUEST_FILLER_TOKENS = {
     "cast",
     "casting",
     "directed",
+    "dislikes",
+    "fan",
+    "fans",
+    "film",
+    "films",
     "find",
     "give",
+    "likes",
     "recommend",
     "recommendation",
     "please",
     "show",
+    "someone",
     "starring",
+    "suggest",
+    "who",
 }
+MOOD_QUERY_HINTS = (
+    (
+        re.compile(r"\bfast[-\s]?paced\b|\bfast\s+movie\b|\bexciting\b|\bhigh[-\s]?energy\b", re.IGNORECASE),
+        ("speed", "exciting", "action", "race", "chase", "suspenseful"),
+    ),
+)
 FUZZY_SEMANTIC_RE = re.compile(
-    r"\b(?:like|similar|vibe|feel|feels|style|mood|tone|atmospheric|thoughtful|weird|grounded|bleak|slow[-\s]?burn|dystopian|modern story|modern setting|epic|intense|tense|mind[-\s]?bending)\b",
+    r"\b(?:like|similar|vibe|feel|feels|style|mood|tone|atmospheric|thoughtful|weird|grounded|bleak|slow[-\s]?burn|dystopian|modern story|modern setting|epic|intense|tense|mind[-\s]?bending|light[-\s]?hearted|uplifting|heartwarming|charming|comfort|cozy)\b",
     re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"[a-z0-9']+")
@@ -218,6 +237,11 @@ MAX_RUNTIME_RE = re.compile(
 )
 MIN_RUNTIME_RE = re.compile(
     r"\b(?:over|more than|at least|min(?:imum)?)\s+(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)?\b",
+    re.IGNORECASE,
+)
+MIN_RATING_RE = re.compile(
+    r"\b(?:imdb\s+)?(?:rating|rated|score)\s*(?:above|over|at least|higher than|>=)\s*(\d(?:\.\d+)?)\b"
+    r"|\b(?:above|over|at least|higher than|>=)\s*(\d(?:\.\d+)?)\s*(?:/10)?\s*(?:imdb\s+)?(?:rating|rated|score)\b",
     re.IGNORECASE,
 )
 
@@ -322,6 +346,21 @@ def extract_runtime_constraint(preferences: str) -> dict[str, Any] | None:
     }
 
 
+def extract_rating_constraint(preferences: str) -> dict[str, Any] | None:
+    normalized = normalize_text(preferences)
+    match = MIN_RATING_RE.search(normalized)
+    if not match:
+        return None
+    raw_rating = next((group for group in match.groups() if group), "")
+    try:
+        min_rating = float(raw_rating)
+    except (TypeError, ValueError):
+        return None
+    if min_rating <= 0.0 or min_rating > 10.0:
+        return None
+    return {"min_rating": min_rating, "label": f"rating at least {min_rating:g}/10"}
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -363,32 +402,6 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _load_retrieval_concepts(path: Path = RETRIEVAL_CONCEPTS_PATH) -> dict[str, dict[str, Any]]:
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-
-    concepts: dict[str, dict[str, Any]] = {}
-    for name, payload in raw.items():
-        if not isinstance(payload, dict):
-            continue
-        concept: dict[str, Any] = {}
-        for key in ("aliases", "boost_terms"):
-            values = payload.get(key, [])
-            if isinstance(values, list):
-                concept[key] = [str(item).strip() for item in values if str(item).strip()]
-            else:
-                concept[key] = []
-        concept["quality_preference"] = bool(payload.get("quality_preference", False))
-        concepts[str(name)] = concept
-    return concepts
 
 
 def _parse_numeric(value: Any) -> float:
@@ -462,11 +475,12 @@ def match_tokens(value: Any) -> set[str]:
     return result
 
 
-RETRIEVAL_CONCEPTS = _load_retrieval_concepts()
-
-
 def extract_quality_preference(preferences: str) -> bool:
     return bool(QUALITY_PREFERENCE_RE.search(str(preferences or "")) or QUALITY_PHRASE_RE.search(str(preferences or "")))
+
+
+def extract_all_time_quality_preference(preferences: str) -> bool:
+    return bool(QUALITY_PHRASE_RE.search(str(preferences or "")))
 
 
 def clean_positive_query_tokens(tokens: set[str], preferences: str, *, quality_preference: bool) -> set[str]:
@@ -477,34 +491,6 @@ def clean_positive_query_tokens(tokens: set[str], preferences: str, *, quality_p
     elif QUALITY_PHRASE_RE.search(str(preferences or "")):
         cleaned.difference_update({"all", "best", "greatest", "time"})
     return cleaned
-
-
-def extract_retrieval_concepts(preferences: str) -> dict[str, Any]:
-    normalized = normalize_text(preferences)
-    matched: list[str] = []
-    boost_terms: list[str] = []
-    quality_preference = False
-
-    for name, concept in RETRIEVAL_CONCEPTS.items():
-        aliases = concept.get("aliases", [])
-        concept_matched = any(
-            re.search(rf"(?<![a-z0-9]){re.escape(normalize_text(alias))}(?![a-z0-9])", normalized)
-            for alias in aliases
-        )
-        if name == "best_all_time" and QUALITY_PHRASE_RE.search(normalized):
-            concept_matched = True
-        if not concept_matched:
-            continue
-        matched.append(name)
-        boost_terms.extend(str(term) for term in concept.get("boost_terms", []))
-        quality_preference = quality_preference or bool(concept.get("quality_preference", False))
-
-    unique_terms = list(dict.fromkeys(term for term in boost_terms if term))
-    return {
-        "concept_matches": matched,
-        "concept_boost_terms": unique_terms[:12],
-        "concept_quality_preference": quality_preference,
-    }
 
 
 def split_csvish(value: Any) -> set[str]:
@@ -590,6 +576,29 @@ def extract_negation_context(preferences: str) -> dict[str, Any]:
             for variant in phrase_variants:
                 if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", variant):
                     hard_block_genres.add(canonical)
+
+    for match in re.finditer(r"\bnon[-\s]+([a-z0-9]+)\b", normalized):
+        phrase = normalize_text(match.group(1))
+        if not phrase:
+            continue
+        negative_phrases.append(phrase)
+        negative_tokens.update({"non", phrase})
+        negative_match_tokens.update(match_tokens(phrase))
+        negative_match_tokens.update({normalize_match_token(phrase)})
+        if phrase in GENRE_ALIASES:
+            hard_block_genres.add(GENRE_ALIASES[phrase])
+
+    for match in re.finditer(r"\b(?:dislikes?|hates?|doesn'?t like|do not like)\s+([a-z0-9][a-z0-9\-\s]{0,24}?)(?=,|\.|;|\bbut\b|\bwith\b|\bfilms?\b|\bmovies?\b|$)", normalized):
+        phrase = " ".join(match.group(1).split()).strip()
+        if not phrase:
+            continue
+        negative_phrases.append(phrase)
+        tokens = tokenize(phrase)
+        negative_tokens.update(tokens)
+        negative_match_tokens.update(match_tokens(phrase))
+        negative_match_tokens.update({normalize_match_token(token) for token in tokens})
+        if phrase in GENRE_ALIASES:
+            hard_block_genres.add(GENRE_ALIASES[phrase])
 
     raw_positive_tokens = tokenize(preferences) - negative_tokens
     positive_query_tokens = set(raw_positive_tokens)
@@ -702,7 +711,6 @@ def add_lexical_columns(movies: pd.DataFrame) -> pd.DataFrame:
         _add_weighted_terms(base, getattr(row, "alternative_titles", ""), 3.0)
         _add_weighted_terms(base, getattr(row, "genres", ""), 3.4)
         _add_weighted_terms(base, getattr(row, "keywords", ""), 3.0)
-        _add_weighted_terms(base, _json_list_text(getattr(row, "keywords_augmented_json", "")), 2.8)
         _add_weighted_terms(base, _json_list_text(getattr(row, "tone_tags_json", "")), 2.5)
         _add_weighted_terms(base, _json_list_text(getattr(row, "audience_tags_json", "")), 2.0)
         _add_weighted_terms(base, _json_list_text(getattr(row, "source_tags_json", "")), 1.8)
@@ -946,6 +954,44 @@ def extract_country_or_language_signals(preferences: str) -> list[str]:
     return matches[:3]
 
 
+def extract_affinity_phrases(preferences: str) -> list[str]:
+    normalized = normalize_text(preferences)
+    phrases: list[str] = []
+    patterns = (
+        r"\b(?:likes?|loves?)\s+([a-z0-9][a-z0-9\-\s]{0,32}?)(?=\s+(?:films?|movies?)\b|,|\.|;|$)",
+        r"\b([a-z0-9][a-z0-9\-\s]{0,24}?)\s+fans?\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalized):
+            phrase = " ".join(match.group(1).split()).strip()
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+    return phrases[:3]
+
+
+def derive_affinity_terms(phrases: list[str], negative_match_tokens: set[str]) -> set[str]:
+    terms: Counter[str] = Counter()
+    for phrase in phrases:
+        normalized_phrase = normalize_text(phrase)
+        if not normalized_phrase:
+            continue
+        phrase_tokens = match_tokens(normalized_phrase)
+        matching_movies = MOVIES[MOVIES["search_blob"].map(lambda blob: normalized_phrase in blob)].head(40)
+        if matching_movies.empty:
+            continue
+        for row in matching_movies.itertuples():
+            for genre in row.genres_set:
+                for token in match_tokens(genre):
+                    terms[token] += 3
+            for keyword in sorted(row.keywords_set)[:10]:
+                for token in match_tokens(keyword):
+                    terms[token] += 1
+    for token in set(terms):
+        if token in negative_match_tokens or token in STOP_WORDS:
+            del terms[token]
+    return {token for token, _ in terms.most_common(8)}
+
+
 def build_retrieval_profile(
     preferences: str,
     history: tuple[tuple[int | None, str], ...],
@@ -961,10 +1007,12 @@ def build_retrieval_profile(
     similarity_request = bool(seed_signals["seed_tmdb_ids"]) and bool(SIMILARITY_RE.search(str(preferences or "")))
     year_constraint = extract_year_constraint(preferences)
     runtime_constraint = extract_runtime_constraint(preferences)
+    rating_constraint = extract_rating_constraint(preferences)
     setting_period = extract_setting_period(preferences)
     country_or_language_signals = extract_country_or_language_signals(preferences)
-    concept_signals = extract_retrieval_concepts(preferences)
-    quality_preference = extract_quality_preference(preferences) or bool(concept_signals["concept_quality_preference"])
+    quality_preference = extract_quality_preference(preferences)
+    all_time_quality_preference = extract_all_time_quality_preference(preferences)
+    direct_mood_request = any(pattern.search(str(preferences or "")) for pattern, _ in MOOD_QUERY_HINTS)
 
     positive_query_tokens = set(negation_context["positive_query_tokens"])
     positive_query_tokens.difference_update(seed_signals["seed_title_tokens"])
@@ -978,9 +1026,22 @@ def build_retrieval_profile(
         positive_query_tokens.update(tokenize(genre))
     for signal in country_or_language_signals:
         positive_query_tokens.update(tokenize(signal))
-    for term in concept_signals["concept_boost_terms"]:
-        positive_query_tokens.update(tokenize(term))
-
+    for pattern, hints in MOOD_QUERY_HINTS:
+        if pattern.search(str(preferences or "")):
+            positive_query_tokens.update(hints)
+    if similarity_request:
+        positive_query_tokens.update(token for genre in seed_signals["seed_genres"] for token in match_tokens(genre))
+        positive_query_tokens.update(token for keyword in sorted(seed_signals["seed_keywords"])[:8] for token in match_tokens(keyword))
+    affinity_phrases = extract_affinity_phrases(preferences)
+    affinity_query_terms: set[str] = set()
+    if affinity_phrases:
+        affinity_query_terms = derive_affinity_terms(affinity_phrases, negation_context["negative_match_tokens"])
+        positive_query_tokens.update(affinity_query_terms)
+    affinity_genre_targets = {
+        genre
+        for genre in set(GENRE_ALIASES.values())
+        if match_tokens(genre).intersection(affinity_query_terms)
+    }
     negative_tokens = set(negation_context["negative_tokens"])
 
     lexical_query_text = " ".join(sorted(positive_query_tokens))
@@ -1010,12 +1071,16 @@ def build_retrieval_profile(
         "similarity_request": similarity_request,
         "year_constraint": year_constraint,
         "runtime_constraint": runtime_constraint,
+        "rating_constraint": rating_constraint,
         "setting_period": setting_period,
         "tone": [],
         "keyword_hints": [],
         "quality_preference": quality_preference,
+        "all_time_quality_preference": all_time_quality_preference,
+        "direct_mood_request": direct_mood_request,
+        "affinity_phrases": affinity_phrases,
+        "affinity_genre_targets": affinity_genre_targets,
         "country_or_language_signals": country_or_language_signals,
-        **concept_signals,
         "year_constraint_unavailable": False,
         "runtime_constraint_unavailable": False,
         "candidate_constraint_note": "",
@@ -1151,7 +1216,6 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
     year_relevant = bool(retrieval_profile.get("year_constraint")) or any(phrase in normalized for phrase in YEAR_SIGNAL_PHRASES)
     keyword_hints = list(dict.fromkeys([
         *list(retrieval_profile.get("keyword_hints", [])),
-        *list(retrieval_profile.get("concept_boost_terms", [])),
     ]))
     return {
         "target_genres": sorted(retrieval_profile["explicit_genre_targets"])[:4],
@@ -1163,37 +1227,24 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
         "year_constraint_unavailable": bool(retrieval_profile.get("year_constraint_unavailable")),
         "runtime_constraint": retrieval_profile.get("runtime_constraint"),
         "runtime_constraint_unavailable": bool(retrieval_profile.get("runtime_constraint_unavailable")),
+        "rating_constraint": retrieval_profile.get("rating_constraint"),
         "setting_period": retrieval_profile.get("setting_period", ""),
         "country_relevant": bool(retrieval_profile.get("country_or_language_signals")),
     }
 
 
 def candidate_evidence(row: pd.Series, retrieval_profile: dict[str, Any]) -> dict[str, Any]:
-    genre_match = not retrieval_profile["explicit_genre_targets"] or genre_alignment_score(row, retrieval_profile) > 0.0
-    avoid_hit = avoid_penalty_score(row, retrieval_profile) > 0.0
-    person_match = not retrieval_profile.get("named_person_signals") or person_anchor_score(row, retrieval_profile) > 0.0
-    year_match = (
-        not retrieval_profile.get("year_constraint")
-        or retrieval_profile.get("year_constraint_unavailable")
-        or year_alignment_score(row, retrieval_profile) > 0.0
+    genre_match = not retrieval_profile["explicit_genre_targets"] or bool(
+        retrieval_profile["explicit_genre_targets"].intersection(row["genres_set"])
     )
-    runtime_match = (
-        not retrieval_profile.get("runtime_constraint")
-        or retrieval_profile.get("runtime_constraint_unavailable")
-        or runtime_alignment_score(row, retrieval_profile) > 0.0
-    )
-    seed_match = not retrieval_profile.get("similarity_request") or seed_similarity_score(row, retrieval_profile) > 0.0
+    constraint_source = str(row.get("constraint_source", "") or "")
     return {
-        "match_score": round(match_score(row, retrieval_profile), 3),
-        "quality_score": round(quality_prior_score(row), 3),
-        "constraint_penalty": round(constraint_penalty_score(row, retrieval_profile), 3),
-        "runtime_alignment": round(runtime_alignment_score(row, retrieval_profile), 3),
         "genre_match": bool(genre_match),
-        "avoid_hit": bool(avoid_hit),
-        "person_match": bool(person_match),
-        "year_match": bool(year_match),
-        "runtime_match": bool(runtime_match),
-        "seed_match": bool(seed_match),
+        "avoid_hit": bool(has_avoid_hit(row, retrieval_profile)),
+        "person_match": bool(has_person_match(row, retrieval_profile)),
+        "year_match": bool(constraint_source == "year" or has_year_match(row, retrieval_profile)),
+        "runtime_match": bool(constraint_source == "runtime" or has_runtime_match(row, retrieval_profile)),
+        "seed_match": bool(has_seed_match(row, retrieval_profile)),
     }
 
 
@@ -1228,9 +1279,9 @@ def build_confidence_bundle(
     specificity_points += 1 if retrieval_profile.get("named_person_signals") else 0
     specificity_points += 1 if prompt_profile.get("year_relevant") else 0
     specificity_points += 1 if retrieval_profile.get("runtime_constraint") else 0
+    specificity_points += 1 if retrieval_profile.get("rating_constraint") else 0
     specificity_points += 1 if prompt_profile.get("setting_period") else 0
     specificity_points += 1 if retrieval_profile.get("similarity_request") else 0
-    specificity_points += 1 if retrieval_profile.get("concept_matches") else 0
     if specificity_points >= 3:
         specificity = "high"
     elif specificity_points >= 2:
@@ -1240,6 +1291,13 @@ def build_confidence_bundle(
 
     semantic_available = bool(retrieval_profile.get("semantic_available"))
     lexical_available = bool(retrieval_profile.get("lexical_available"))
+    fuzzy_or_mood_request = bool(
+        retrieval_profile.get("similarity_request")
+        or prompt_profile.get("setting_period")
+        or retrieval_profile.get("tone")
+        or retrieval_profile.get("keyword_hints")
+        or FUZZY_SEMANTIC_RE.search(str(retrieval_profile.get("normalized_preferences", "")))
+    )
     bm25_present = float(top.get("bm25_score", 0.0)) > 0.0
     semantic_present = float(top.get("semantic_score", 0.0)) > 0.0
     if semantic_available and bm25_present and semantic_present:
@@ -1252,7 +1310,7 @@ def build_confidence_bundle(
     contradictions: list[str] = []
     if retrieval_profile["explicit_genre_targets"] and not bool(top.get("genre_match", False)):
         contradictions.append("genre_miss")
-    if retrieval_profile["negative_phrases"] and float(top.get("constraint_penalty", 0.0)) >= 0.5 and bool(top.get("avoid_hit", False)):
+    if retrieval_profile["negative_phrases"] and bool(top.get("avoid_hit", False)):
         contradictions.append("avoid_hit")
     if retrieval_profile.get("named_person_signals") and not bool(top.get("person_match", False)):
         contradictions.append("person_miss")
@@ -1270,28 +1328,46 @@ def build_confidence_bundle(
         contradictions.append("runtime_miss")
     if retrieval_profile.get("similarity_request") and not bool(top.get("seed_match", False)):
         contradictions.append("seed_miss")
+    rating_constraint_satisfied = True
+    rating_constraint = retrieval_profile.get("rating_constraint")
+    if rating_constraint:
+        try:
+            min_rating = float(rating_constraint.get("min_rating", 0.0))
+        except (TypeError, ValueError):
+            min_rating = 0.0
+        if min_rating > 0.0 and top_rating < min_rating:
+            rating_constraint_satisfied = False
 
-    top_match = float(top.get("match_score", 0.0))
-    top_quality = float(top.get("quality_score", 0.0))
+    top_source = float(top.get("source_score", top.get("score", 0.0)) or 0.0)
+    top_quality = float(top.get("consensus_quality_score", 0.0) or 0.0)
     quality_safe = top_rating >= 6.4 and top_votes >= 120 and top_quality >= 0.55
     if retrieval_profile.get("quality_preference"):
         quality_safe = top_rating >= 6.8 and top_votes >= 500 and top_quality >= 0.60
 
     if contradictions:
         top_fulfillment = "low"
-    elif top_match >= 0.65:
+    elif top_source >= 0.50:
         top_fulfillment = "high"
-    elif top_match >= 0.42:
+    elif top_source >= 0.28:
         top_fulfillment = "medium"
     else:
         top_fulfillment = "low"
 
-    if not contradictions and top_match >= 0.65 and gap1 >= 0.05 and quality_safe:
+    quality_genre_request = bool(retrieval_profile.get("quality_preference") and retrieval_profile["explicit_genre_targets"])
+    if (
+        not contradictions
+        and top_source >= 0.50
+        and gap1 >= 0.05
+        and quality_safe
+        and not fuzzy_or_mood_request
+        and not quality_genre_request
+        and rating_constraint_satisfied
+    ):
         confidence = "high"
         route = "description_only"
-    elif not contradictions and top_match >= 0.42:
+    elif not contradictions and top_source >= 0.28:
         confidence = "medium"
-        route = "judge_5"
+        route = "judge_8" if fuzzy_or_mood_request or retrieval_profile.get("similarity_request") else "judge_5"
     else:
         confidence = "low"
         route = "judge_8"
@@ -1307,13 +1383,20 @@ def build_confidence_bundle(
         "contradictions": contradictions,
         "semantic_available": semantic_available,
         "lexical_available": lexical_available,
+        "fuzzy_or_mood_request": fuzzy_or_mood_request,
+        "rating_constraint_satisfied": rating_constraint_satisfied,
         "quality_safe": quality_safe,
         "top_candidate_tmdb_id": int(top["tmdb_id"]),
     }
 
 
 def build_query_text(preferences: str, retrieval_profile: dict[str, Any]) -> str:
-    return retrieval_profile["lexical_query_text"] or str(preferences or "").strip()
+    lexical_query_text = str(retrieval_profile.get("lexical_query_text") or "").strip()
+    if lexical_query_text:
+        return lexical_query_text
+    if retrieval_profile.get("quality_preference") or is_broad_quality_request(retrieval_profile):
+        return ""
+    return str(preferences or "").strip()
 
 
 def _bm25(tf: float, doc_len: float, avg_doc_len: float, idf: float, k1: float = 1.45, b: float = 0.72) -> float:
@@ -1421,86 +1504,6 @@ def search_optional_semantic(
         return [], False, time.perf_counter() - started
 
 
-def seed_similarity_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    if not retrieval_profile.get("similarity_request"):
-        return 0.0
-    score = 0.0
-    score += 1.6 * len(retrieval_profile["seed_genres"].intersection(row["genres_set"]))
-    score += 0.6 * len(retrieval_profile["seed_keywords"].intersection(row["keywords_set"]))
-    if int(row["tmdb_id"]) in retrieval_profile["seed_similar_ids"]:
-        score += 2.5
-    if int(row["tmdb_id"]) in retrieval_profile.get("seed_recommended_ids", set()):
-        score += 1.8
-    return score
-
-
-def keyword_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    positive_tokens = retrieval_profile["positive_query_tokens"] or retrieval_profile["raw_preference_tokens"]
-    if not positive_tokens:
-        return 0.0
-    blob_overlap = len(positive_tokens.intersection(row["search_blob_tokens"]))
-    keyword_overlap = len(positive_tokens.intersection(row["keywords_set"]))
-    phrase_hints = [
-        *list(retrieval_profile.get("keyword_hints", [])),
-        *list(retrieval_profile.get("concept_boost_terms", [])),
-    ]
-    hint_phrase_hits = sum(
-        1
-        for hint in phrase_hints
-        if normalize_text(hint) and normalize_text(hint) in row["search_blob"]
-    )
-    score = 0.5 * blob_overlap + 0.4 * keyword_overlap + 1.2 * hint_phrase_hits
-    return _normalize_component(score, 8.0)
-
-
-def genre_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    targets = retrieval_profile["explicit_genre_targets"]
-    if not targets:
-        return 0.0
-    overlap = len(targets.intersection(row["genres_set"]))
-    if overlap <= 0:
-        return -1.0
-    return _normalize_component(float(overlap), float(len(targets)))
-
-
-def avoid_penalty_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    negative_overlap = len(retrieval_profile["negative_match_tokens"].intersection(row["search_blob_match_tokens"]))
-    phrase_hits = sum(
-        1 for phrase in retrieval_profile["negative_phrases"] if normalize_text(phrase) in row["search_blob"]
-    )
-    hard_block = 1.0 if retrieval_profile["hard_block_genres"].intersection(row["genres_set"]) else 0.0
-    return _normalize_component(float(negative_overlap) + phrase_hits * 2.0 + hard_block * 3.0, 4.0)
-
-
-def year_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    constraint = retrieval_profile.get("year_constraint")
-    if not constraint or retrieval_profile.get("year_constraint_unavailable"):
-        return 0.0
-    try:
-        year = int(row["year"])
-    except (TypeError, ValueError):
-        return -1.0
-    if int(constraint["min_year"]) <= year <= int(constraint["max_year"]):
-        return 1.0
-    return -1.0
-
-
-def runtime_alignment_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    constraint = retrieval_profile.get("runtime_constraint")
-    if not constraint or retrieval_profile.get("runtime_constraint_unavailable"):
-        return 0.0
-    runtime = pd.to_numeric(pd.Series([row.get("runtime_min")]), errors="coerce").iloc[0]
-    if pd.isna(runtime):
-        return -1.0
-    max_runtime = constraint.get("max_runtime")
-    min_runtime = constraint.get("min_runtime")
-    if max_runtime is not None and float(runtime) > float(max_runtime):
-        return -1.0
-    if min_runtime is not None and float(runtime) < float(min_runtime):
-        return -1.0
-    return 1.0
-
-
 def quality_prior_score(row: pd.Series) -> float:
     if "consensus_quality_score" in row:
         try:
@@ -1512,76 +1515,38 @@ def quality_prior_score(row: pd.Series) -> float:
     return 0.65 * rating + 0.35 * votes
 
 
-def person_anchor_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    signals = retrieval_profile.get("named_person_signals", [])
-    if not signals:
-        return 0.0
-    director_matches = len(set(signals).intersection(row["director_set"]))
-    cast_matches = len(set(signals).intersection(row["cast_set"]))
-    if director_matches > 0:
-        return 1.0
-    if cast_matches > 0:
-        return 0.6
-    return 0.0
-
-
 def is_broad_quality_request(retrieval_profile: dict[str, Any]) -> bool:
     if retrieval_profile.get("quality_preference"):
         return True
+    if retrieval_profile.get("similarity_request") or retrieval_profile.get("direct_mood_request"):
+        return False
     specificity = 0
     specificity += 1 if retrieval_profile.get("explicit_genre_targets") else 0
     specificity += 1 if retrieval_profile.get("negative_phrases") else 0
     specificity += 1 if retrieval_profile.get("named_person_signals") else 0
     specificity += 1 if retrieval_profile.get("year_constraint") else 0
+    specificity += 1 if retrieval_profile.get("rating_constraint") else 0
     specificity += 1 if retrieval_profile.get("setting_period") else 0
     specificity += 1 if retrieval_profile.get("similarity_request") else 0
     specificity += 1 if retrieval_profile.get("tone") or retrieval_profile.get("keyword_hints") else 0
     return specificity <= 1
 
 
-def hard_match_support_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    active_scores: list[float] = []
-    if retrieval_profile["explicit_genre_targets"]:
-        active_scores.append(max(0.0, genre_alignment_score(row, retrieval_profile)))
-    if retrieval_profile.get("named_person_signals"):
-        active_scores.append(person_anchor_score(row, retrieval_profile))
+def needs_quality_backup(retrieval_profile: dict[str, Any]) -> bool:
+    if retrieval_profile.get("quality_preference") or is_broad_quality_request(retrieval_profile):
+        return True
     if retrieval_profile.get("similarity_request"):
-        active_scores.append(_normalize_component(seed_similarity_score(row, retrieval_profile), 8.0))
-    if retrieval_profile.get("year_constraint") and not retrieval_profile.get("year_constraint_unavailable"):
-        active_scores.append(max(0.0, year_alignment_score(row, retrieval_profile)))
-    if retrieval_profile.get("runtime_constraint") and not retrieval_profile.get("runtime_constraint_unavailable"):
-        active_scores.append(max(0.0, runtime_alignment_score(row, retrieval_profile)))
-    return float(np.mean(active_scores)) if active_scores else 0.0
-
-
-def match_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    retrieval_vote = float(row.get("retrieval_vote_score", row.get("bm25_score", 0.0)) or 0.0)
-    theme_overlap = keyword_alignment_score(row, retrieval_profile)
-    hard_support = hard_match_support_score(row, retrieval_profile)
-    return min(1.0, 0.65 * retrieval_vote + 0.20 * theme_overlap + 0.15 * hard_support)
-
-
-def constraint_penalty_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
-    penalty = 1.1 * avoid_penalty_score(row, retrieval_profile)
-    if retrieval_profile["explicit_genre_targets"] and genre_alignment_score(row, retrieval_profile) < 0.0:
-        penalty += 0.9
-    if retrieval_profile.get("named_person_signals") and person_anchor_score(row, retrieval_profile) <= 0.0:
-        penalty += 1.0
-    if (
-        retrieval_profile.get("year_constraint")
-        and not retrieval_profile.get("year_constraint_unavailable")
-        and year_alignment_score(row, retrieval_profile) <= 0.0
-    ):
-        penalty += 1.0
-    if (
-        retrieval_profile.get("runtime_constraint")
-        and not retrieval_profile.get("runtime_constraint_unavailable")
-        and runtime_alignment_score(row, retrieval_profile) <= 0.0
-    ):
-        penalty += 1.0
-    if retrieval_profile.get("similarity_request") and seed_similarity_score(row, retrieval_profile) <= 0.0:
-        penalty += 0.7
-    return min(penalty, 2.0)
+        return True
+    genre_or_affinity_request = bool(
+        retrieval_profile.get("explicit_genre_targets")
+        or retrieval_profile.get("affinity_genre_targets")
+    )
+    return bool(
+        genre_or_affinity_request
+        and not retrieval_profile.get("named_person_signals")
+        and not retrieval_profile.get("year_constraint")
+        and not retrieval_profile.get("runtime_constraint")
+    )
 
 
 def excluded_by_profile(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
@@ -1590,18 +1555,120 @@ def excluded_by_profile(row: pd.Series, retrieval_profile: dict[str, Any]) -> bo
         return True
     if tmdb_id in retrieval_profile.get("exclude_seed_tmdb_ids", set()):
         return True
-    return bool(row["title_root"] and row["title_root"] in retrieval_profile.get("exclude_seed_title_roots", set()))
+    return False
 
 
-def hybrid_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
+def seed_relation_for_id(tmdb_id: int, retrieval_profile: dict[str, Any]) -> str:
+    if tmdb_id in retrieval_profile.get("seed_similar_ids", set()):
+        return "similar"
+    if tmdb_id in retrieval_profile.get("seed_recommended_ids", set()):
+        return "recommended"
+    return ""
+
+
+def has_avoid_hit(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    return bool(
+        retrieval_profile["negative_match_tokens"].intersection(row["search_blob_match_tokens"])
+        or any(normalize_text(phrase) in row["search_blob"] for phrase in retrieval_profile["negative_phrases"])
+        or retrieval_profile["hard_block_genres"].intersection(row["genres_set"])
+    )
+
+
+def has_person_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    signals = set(retrieval_profile.get("named_person_signals", []))
+    return not signals or bool(signals.intersection(row["director_set"]) or signals.intersection(row["cast_set"]))
+
+
+def has_year_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    constraint = retrieval_profile.get("year_constraint")
+    if not constraint or retrieval_profile.get("year_constraint_unavailable"):
+        return True
+    try:
+        year = int(row["year"])
+    except (TypeError, ValueError):
+        return False
+    return int(constraint["min_year"]) <= year <= int(constraint["max_year"])
+
+
+def has_runtime_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    constraint = retrieval_profile.get("runtime_constraint")
+    if not constraint or retrieval_profile.get("runtime_constraint_unavailable"):
+        return True
+    runtime = pd.to_numeric(pd.Series([row.get("runtime_min")]), errors="coerce").iloc[0]
+    if pd.isna(runtime):
+        return False
+    max_runtime = constraint.get("max_runtime")
+    min_runtime = constraint.get("min_runtime")
+    if max_runtime is not None and float(runtime) > float(max_runtime):
+        return False
+    if min_runtime is not None and float(runtime) < float(min_runtime):
+        return False
+    return True
+
+
+def has_seed_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    if not retrieval_profile.get("similarity_request"):
+        return True
+    return bool(
+        seed_relation_for_id(int(row["tmdb_id"]), retrieval_profile)
+        or retrieval_profile["seed_genres"].intersection(row["genres_set"])
+        or retrieval_profile["seed_keywords"].intersection(row["keywords_set"])
+    )
+
+
+def _rank_source_component(rank: Any) -> float:
+    try:
+        rank_value = float(rank)
+    except (TypeError, ValueError):
+        return 0.0
+    if rank_value <= 0.0:
+        return 0.0
+    return 30.0 / (RRF_K + rank_value)
+
+
+def candidate_source_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     if excluded_by_profile(row, retrieval_profile):
         return -10_000.0
-    match_component = match_score(row, retrieval_profile)
+
+    score = _rank_source_component(row.get("bm25_rank", 0.0)) + _rank_source_component(row.get("semantic_rank", 0.0))
+
+    seed_relation = str(row.get("seed_relation", "")) or seed_relation_for_id(int(row["tmdb_id"]), retrieval_profile)
+    if seed_relation == "similar":
+        score += 0.65
+    elif seed_relation == "recommended":
+        score += 0.50
+    elif retrieval_profile.get("similarity_request") and has_seed_match(row, retrieval_profile):
+        score += 0.12
+
+    constraint_source = str(row.get("constraint_source", "") or "")
+    if constraint_source == "quality":
+        score += 0.45 if needs_quality_backup(retrieval_profile) else 0.35
+    elif constraint_source:
+        score += 0.18
+    if retrieval_profile["explicit_genre_targets"] and retrieval_profile["explicit_genre_targets"].intersection(row["genres_set"]):
+        score += 0.10
+    if retrieval_profile.get("named_person_signals") and has_person_match(row, retrieval_profile):
+        score += 0.22
+    if retrieval_profile.get("year_constraint") and has_year_match(row, retrieval_profile):
+        score += 0.08
+    if retrieval_profile.get("runtime_constraint") and has_runtime_match(row, retrieval_profile):
+        score += 0.06
+
+    if has_avoid_hit(row, retrieval_profile):
+        score -= 0.35
+
     quality_component = quality_prior_score(row)
-    penalty_component = constraint_penalty_score(row, retrieval_profile)
-    if retrieval_profile.get("quality_preference") or is_broad_quality_request(retrieval_profile):
-        return 0.55 * match_component + 0.35 * quality_component - 0.70 * penalty_component
-    return 0.72 * match_component + 0.18 * quality_component - 0.70 * penalty_component
+    if retrieval_profile.get("quality_preference"):
+        quality_weight = 0.35
+    elif is_broad_quality_request(retrieval_profile):
+        quality_weight = 0.25
+    elif needs_quality_backup(retrieval_profile):
+        quality_weight = 0.18
+    else:
+        quality_weight = 0.08
+    score += quality_weight * quality_component
+
+    return max(score, -10_000.0)
 
 
 def diversify_candidates(candidates: pd.DataFrame, limit: int) -> pd.DataFrame:
@@ -1624,7 +1691,7 @@ def diversify_candidates(candidates: pd.DataFrame, limit: int) -> pd.DataFrame:
     if len(indices) < limit:
         indices.extend(deferred_indices[: max(0, limit - len(indices))])
 
-    return candidates.loc[indices].sort_values(["second_stage_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
+    return candidates.loc[indices].sort_values(["source_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
 
 
 def filter_semantic_only_candidates(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.DataFrame:
@@ -1659,7 +1726,7 @@ def apply_quality_floor(candidates: pd.DataFrame, retrieval_profile: dict[str, A
     if candidates.empty:
         return candidates
     if retrieval_profile.get("quality_preference"):
-        rating_floor = 7.0
+        rating_floor = 8.0 if retrieval_profile.get("all_time_quality_preference") else 7.4
         vote_floor = 1000
     elif is_broad_quality_request(retrieval_profile):
         rating_floor = 6.5
@@ -1699,9 +1766,9 @@ def preserve_seed_candidates(candidates: pd.DataFrame, retrieval_profile: dict[s
     if preserved.empty:
         return candidates
 
-    preserved["bm25_score"] = 0.0
-    preserved["semantic_score"] = 0.0
-    preserved["retrieval_vote_score"] = 0.0
+    preserved = _with_empty_recall_scores(preserved)
+    preserved["seed_relation"] = preserved["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
+    preserved["constraint_source"] = "seed"
     return pd.concat([candidates, preserved], ignore_index=False).drop_duplicates(subset=["tmdb_id"], keep="first")
 
 
@@ -1716,16 +1783,28 @@ def _candidate_frame(
     if mode in {"hybrid", "lexical"}:
         for rank, hit in enumerate(lexical_hits, start=1):
             tmdb_id = int(hit["tmdb_id"])
-            combined.setdefault(tmdb_id, {"bm25_score": 0.0, "semantic_score": 0.0, "retrieval_vote_score": 0.0})
+            combined.setdefault(
+                tmdb_id,
+                {"bm25_score": 0.0, "semantic_score": 0.0, "retrieval_vote_score": 0.0, "bm25_rank": 0.0, "semantic_rank": 0.0},
+            )
             combined[tmdb_id]["bm25_score"] = max(combined[tmdb_id]["bm25_score"], float(hit["lexical_score"]))
-            combined[tmdb_id]["retrieval_vote_score"] += 1.0 / (RRF_K + float(hit.get("lexical_rank", rank)))
+            lexical_rank = float(hit.get("lexical_rank", rank))
+            existing_rank = combined[tmdb_id]["bm25_rank"]
+            combined[tmdb_id]["bm25_rank"] = lexical_rank if existing_rank <= 0.0 else min(existing_rank, lexical_rank)
+            combined[tmdb_id]["retrieval_vote_score"] += 1.0 / (RRF_K + lexical_rank)
 
     if mode in {"hybrid", "semantic"}:
         for rank, hit in enumerate(semantic_hits, start=1):
             tmdb_id = int(hit["tmdb_id"])
-            combined.setdefault(tmdb_id, {"bm25_score": 0.0, "semantic_score": 0.0, "retrieval_vote_score": 0.0})
+            combined.setdefault(
+                tmdb_id,
+                {"bm25_score": 0.0, "semantic_score": 0.0, "retrieval_vote_score": 0.0, "bm25_rank": 0.0, "semantic_rank": 0.0},
+            )
             combined[tmdb_id]["semantic_score"] = max(combined[tmdb_id]["semantic_score"], float(hit["semantic_score"]))
-            combined[tmdb_id]["retrieval_vote_score"] += 1.0 / (RRF_K + float(rank))
+            semantic_rank = float(hit.get("semantic_rank", rank))
+            existing_rank = combined[tmdb_id]["semantic_rank"]
+            combined[tmdb_id]["semantic_rank"] = semantic_rank if existing_rank <= 0.0 else min(existing_rank, semantic_rank)
+            combined[tmdb_id]["retrieval_vote_score"] += 1.0 / (RRF_K + semantic_rank)
 
     if not combined:
         return MOVIES.iloc[0:0].copy()
@@ -1735,13 +1814,15 @@ def _candidate_frame(
     candidates = candidates[~candidates["title"].isin(retrieval_profile["history_titles"])]
     if retrieval_profile.get("exclude_seed_tmdb_ids"):
         candidates = candidates[~candidates["tmdb_id"].isin(retrieval_profile["exclude_seed_tmdb_ids"])]
-    if retrieval_profile.get("exclude_seed_title_roots"):
-        candidates = candidates[~candidates["title_root"].isin(retrieval_profile["exclude_seed_title_roots"])]
     if retrieval_profile["hard_block_genres"]:
         candidates = candidates[~candidates["genres_set"].map(lambda genres: bool(genres.intersection(retrieval_profile["hard_block_genres"])))]
     candidates["bm25_score"] = candidates["tmdb_id"].map(lambda value: combined[int(value)]["bm25_score"])
     candidates["semantic_score"] = candidates["tmdb_id"].map(lambda value: combined[int(value)]["semantic_score"])
     candidates["retrieval_vote_score"] = candidates["tmdb_id"].map(lambda value: combined[int(value)]["retrieval_vote_score"])
+    candidates["bm25_rank"] = candidates["tmdb_id"].map(lambda value: combined[int(value)]["bm25_rank"])
+    candidates["semantic_rank"] = candidates["tmdb_id"].map(lambda value: combined[int(value)]["semantic_rank"])
+    candidates["seed_relation"] = candidates["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
+    candidates["constraint_source"] = ""
     max_vote = float(candidates["retrieval_vote_score"].max() or 0.0)
     if max_vote > 0.0:
         candidates["retrieval_vote_score"] = candidates["retrieval_vote_score"] / max_vote
@@ -1769,8 +1850,6 @@ def _eligible_movies(mask: pd.Series, retrieval_profile: dict[str, Any]) -> pd.D
     matches = matches[~matches["title"].isin(retrieval_profile["history_titles"])]
     if retrieval_profile.get("exclude_seed_tmdb_ids"):
         matches = matches[~matches["tmdb_id"].isin(retrieval_profile["exclude_seed_tmdb_ids"])]
-    if retrieval_profile.get("exclude_seed_title_roots"):
-        matches = matches[~matches["title_root"].isin(retrieval_profile["exclude_seed_title_roots"])]
     if retrieval_profile["hard_block_genres"]:
         matches = matches[~matches["genres_set"].map(lambda genres: bool(genres.intersection(retrieval_profile["hard_block_genres"])))]
     return matches
@@ -1781,6 +1860,11 @@ def _with_empty_recall_scores(frame: pd.DataFrame) -> pd.DataFrame:
     scored["bm25_score"] = 0.0
     scored["semantic_score"] = 0.0
     scored["retrieval_vote_score"] = 0.0
+    scored["bm25_rank"] = 0.0
+    scored["semantic_rank"] = 0.0
+    scored["seed_relation"] = ""
+    scored["constraint_source"] = ""
+    scored["source_score"] = 0.0
     return scored
 
 
@@ -1789,18 +1873,34 @@ def _append_constraint_matches(
     matches: pd.DataFrame,
     retrieval_profile: dict[str, Any],
     limit: int = 20,
+    source: str = "constraint",
 ) -> pd.DataFrame:
+    match_ids = set(matches["tmdb_id"].astype(int)) if not matches.empty else set()
     if candidates.empty:
-        return _with_empty_recall_scores(matches)
-    missing = matches[~matches["tmdb_id"].isin(set(candidates["tmdb_id"].astype(int)))].copy()
-    if missing.empty:
-        return candidates
-    missing = _with_empty_recall_scores(missing)
-    missing["second_stage_score"] = missing.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)
+        missing = _with_empty_recall_scores(matches)
+    else:
+        existing_mask = candidates["tmdb_id"].isin(match_ids)
+        if existing_mask.any():
+            candidates = candidates.copy()
+            candidates.loc[existing_mask & (candidates["constraint_source"].astype(str) == ""), "constraint_source"] = source
+            candidates.loc[existing_mask, "source_score"] = candidates[existing_mask].apply(
+                candidate_source_score,
+                axis=1,
+                retrieval_profile=retrieval_profile,
+            )
+        missing = matches[~matches["tmdb_id"].isin(set(candidates["tmdb_id"].astype(int)))].copy()
+        if missing.empty:
+            return candidates
+        missing = _with_empty_recall_scores(missing)
+    missing["constraint_source"] = source
+    missing["seed_relation"] = missing["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
+    missing["source_score"] = missing.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
     missing = missing.sort_values(
-        ["second_stage_score", "consensus_quality_score", "effective_rating", "effective_votes"],
+        ["source_score", "consensus_quality_score", "effective_rating", "effective_votes"],
         ascending=False,
     ).head(limit)
+    if candidates.empty:
+        return missing
     return pd.concat([candidates, missing], ignore_index=False).drop_duplicates(subset=["tmdb_id"], keep="first")
 
 
@@ -1824,7 +1924,7 @@ def apply_year_constraint(
         )
         return candidates, profile
 
-    candidates = _append_constraint_matches(candidates, global_matches, profile)
+    candidates = _append_constraint_matches(candidates, global_matches, profile, source="year")
 
     constrained = candidates[_year_mask(candidates, constraint)].copy()
     if constrained.empty:
@@ -1847,6 +1947,8 @@ def apply_runtime_constraint(
         profile["runtime_constraint_unavailable"] = True
         return candidates, profile
 
+    candidates = _append_constraint_matches(candidates, global_matches, profile, source="runtime")
+
     hard_short_mask = pd.Series(True, index=candidates.index)
     if constraint.get("short_requested"):
         runtimes = pd.to_numeric(candidates["runtime_min"], errors="coerce")
@@ -1861,11 +1963,48 @@ def apply_runtime_constraint(
     return candidates, profile
 
 
+def preserve_person_candidates(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.DataFrame:
+    signals = set(retrieval_profile.get("named_person_signals", []))
+    if not signals:
+        return candidates
+    person_mask = MOVIES["director_set"].map(lambda people: bool(signals.intersection(people))) | MOVIES["cast_set"].map(
+        lambda people: bool(signals.intersection(people))
+    )
+    matches = _eligible_movies(person_mask, retrieval_profile)
+    if matches.empty:
+        return candidates
+    return _append_constraint_matches(candidates, matches, retrieval_profile, limit=20, source="person")
+
+
+def preserve_quality_candidates(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.DataFrame:
+    if not needs_quality_backup(retrieval_profile):
+        return candidates
+    rating_floor = 8.0 if retrieval_profile.get("all_time_quality_preference") else 7.4 if retrieval_profile.get("quality_preference") else 7.2
+    quality_mask = (
+        (pd.to_numeric(MOVIES["effective_rating"], errors="coerce").fillna(0.0) >= rating_floor)
+        & (pd.to_numeric(MOVIES["effective_votes"], errors="coerce").fillna(0.0) >= 1000)
+    )
+    matches = _eligible_movies(quality_mask, retrieval_profile)
+    genre_targets = set(retrieval_profile.get("explicit_genre_targets", set()))
+    if retrieval_profile.get("similarity_request") and not genre_targets:
+        genre_targets = set(retrieval_profile.get("seed_genres", set()))
+    if retrieval_profile.get("affinity_genre_targets") and not genre_targets:
+        genre_targets = set(retrieval_profile.get("affinity_genre_targets", set()))
+    if genre_targets and not matches.empty:
+        genre_matches = matches[matches["genres_set"].map(lambda genres: bool(genre_targets.intersection(genres)))].copy()
+        if len(genre_matches) >= min(5, len(matches)):
+            matches = genre_matches
+    if matches.empty:
+        return candidates
+    return _append_constraint_matches(candidates, matches, retrieval_profile, limit=20, source="quality")
+
+
 def local_fallback_candidates(preferences: str, history: tuple[tuple[int | None, str], ...]) -> tuple[pd.DataFrame, dict[str, Any]]:
     retrieval_profile = build_retrieval_profile(preferences, history)
     candidates = _with_empty_recall_scores(MOVIES)
-    candidates["second_stage_score"] = candidates.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)
-    candidates = candidates.sort_values(["second_stage_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
+    candidates["seed_relation"] = candidates["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
+    candidates["source_score"] = candidates.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
+    candidates = candidates.sort_values(["source_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
     return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile
 
 
@@ -1892,6 +2031,8 @@ def build_candidate_pool(
 
     candidates = _candidate_frame(lexical_hits, semantic_hits, retrieval_profile, resolved_mode)
     candidates = preserve_seed_candidates(candidates, retrieval_profile)
+    candidates = preserve_person_candidates(candidates, retrieval_profile)
+    candidates = preserve_quality_candidates(candidates, retrieval_profile)
     candidates = filter_semantic_only_candidates(candidates, retrieval_profile)
     candidates = apply_quality_floor(candidates, retrieval_profile)
     candidates, retrieval_profile = apply_year_constraint(candidates, retrieval_profile)
@@ -1910,8 +2051,9 @@ def build_candidate_pool(
         fallback_profile["semantic_enabled"] = ENABLE_HF_SEMANTIC_RETRIEVAL
         return fallback, fallback_profile, "local_fallback"
 
-    candidates["second_stage_score"] = candidates.apply(hybrid_score, axis=1, retrieval_profile=retrieval_profile)
-    candidates = candidates.sort_values(["second_stage_score", "retrieval_vote_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
+    candidates["seed_relation"] = candidates["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
+    candidates["source_score"] = candidates.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
+    candidates = candidates.sort_values(["source_score", "retrieval_vote_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
     retrieval_profile = dict(retrieval_profile)
     retrieval_profile["lexical_hit_count"] = len(lexical_hits)
     retrieval_profile["semantic_hit_count"] = len(semantic_hits)
@@ -1942,7 +2084,7 @@ def build_shortlist(
     if preserve_bm25_ids:
         preserved = candidates[candidates["tmdb_id"].isin(preserve_bm25_ids)]
         reranked = pd.concat([reranked, preserved], ignore_index=False).drop_duplicates(subset=["tmdb_id"], keep="first")
-    reranked = reranked.sort_values(["second_stage_score", "retrieval_vote_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
+    reranked = reranked.sort_values(["source_score", "retrieval_vote_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
     reranked = diversify_candidates(reranked, SHORTLIST_SIZE)
 
     retrieval_profile = dict(retrieval_profile)
@@ -1956,9 +2098,14 @@ def build_shortlist(
             {
                 "tmdb_id": int(row.tmdb_id),
                 "title": row.title,
-                "score": round(float(row.second_stage_score), 3),
+                "score": round(float(getattr(row, "source_score", 0.0)), 3),
+                "source_score": round(float(getattr(row, "source_score", 0.0)), 3),
                 "semantic_score": round(float(getattr(row, "semantic_score", 0.0)), 3),
                 "bm25_score": round(float(getattr(row, "bm25_score", 0.0)), 3),
+                "bm25_rank": int(float(getattr(row, "bm25_rank", 0.0))),
+                "semantic_rank": int(float(getattr(row, "semantic_rank", 0.0))),
+                "seed_relation": str(getattr(row, "seed_relation", "") or ""),
+                "constraint_source": str(getattr(row, "constraint_source", "") or ""),
                 "retrieval_vote_score": round(float(getattr(row, "retrieval_vote_score", 0.0)), 3),
                 "vote_average": round(float(row.vote_average), 3),
                 "vote_count": int(row.vote_count),
