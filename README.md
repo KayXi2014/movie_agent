@@ -111,7 +111,6 @@ What it does:
 - checks whether TMDB enrichment is stale, and only refreshes it if TMDB credentials are set and rows still need enrichment
 - applies `data/IMDB_ratings.tsv` into the active dataset only when IMDb rows differ from the CSV
 - checks whether LLM augmentation is stale, and only refreshes it if `OLLAMA_API_KEY` is set and rows still need augmentation
-- does not rebuild SQLite artifacts; runtime lexical retrieval reads the active CSV directly
 
 By default, `prepare_local_runtime` is idempotent: it skips TMDB enrichment, IMDb overlay, and LLM augmentation if they are already current.
 
