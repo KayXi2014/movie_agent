@@ -296,6 +296,23 @@ def _build_selection_prompt(
     def _query_mentions_any(items: list[str]) -> bool:
         return any(_normalize_text(item) in normalized_preferences for item in items if item)
 
+    def _quality_signal(movie: dict[str, Any]) -> str:
+        try:
+            rating = float(movie.get("vote_average", 0.0))
+            votes = int(float(movie.get("vote_count", 0)))
+        except (TypeError, ValueError):
+            rating = 0.0
+            votes = 0
+        if rating >= 8.0 and votes >= 100_000:
+            return "very strong"
+        if rating >= 7.2 and votes >= 25_000:
+            return "strong"
+        if rating >= 6.2 and votes >= 1_000:
+            return "acceptable"
+        if rating > 0.0 and votes > 0:
+            return "limited"
+        return "unknown"
+
     include_director = force_include_director or "director" in preference_tokens or "filmmaker" in preference_tokens
     include_cast = force_include_cast or bool({"actor", "actors", "actress", "actresses", "cast", "star", "stars", "starring"} & preference_tokens)
     include_country = force_include_country
@@ -341,14 +358,7 @@ def _build_selection_prompt(
             parts.append(f"country: {country}")
 
         if include_quality:
-            try:
-                rating = float(movie.get("vote_average", 0.0))
-                votes = int(float(movie.get("vote_count", 0)))
-            except (TypeError, ValueError):
-                rating = 0.0
-                votes = 0
-            if rating > 0.0 or votes > 0:
-                parts.append(f"quality: {rating:.1f}/10 from {votes:,} votes")
+            parts.append(f"quality signal: {_quality_signal(movie)}")
 
         premise = _trim_text(movie.get("overview"), 56) or "clear premise"
         parts.append(f"premise: {premise}")
@@ -373,8 +383,8 @@ def _build_selection_prompt(
             "- Use only listed candidate details; do not invent another movie.",
             "- Honor explicit director, cast, year, story-setting, and avoid constraints.",
             "- If no candidate fully fits, pick the closest and briefly acknowledge the gap.",
-            "- Use rating/votes as quality evidence; when fit is similar, prefer stronger rating/vote support.",
-            "- Call a rating high only at 7.2/10 or above.",
+            "- Use quality signal only as an internal tie-breaker when fit is similar.",
+            "- Do not mention scores, ratings, vote counts, quality signals, or selection metadata in the description.",
             'Return JSON only: {"tmdb_id": <id>, "title": "<exact title>", "description": "<2-3 sentences, under 500 chars>"}',
             "",
             "Candidates:",
@@ -550,7 +560,7 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
         genres = _natural_list([part.strip().lower() for part in str(movie["genres"]).split(",") if part.strip()][:2])
         fit_line = f"If you are browsing in {_article_for(genres)} {genres} mood, this gives you a clearer reason to press play than most filler picks."
     else:
-        fit_line = "If you want something without overthinking it, this is the most defensible fallback I can make from the shortlist."
+        fit_line = "If you want something without overthinking it, this is the most defensible choice I can make."
 
     parts = [hook]
     if support_line:

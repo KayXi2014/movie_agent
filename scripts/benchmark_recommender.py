@@ -25,8 +25,8 @@ if str(ROOT) not in sys.path:
 import llm
 
 DATA_DIR = ROOT / "data"
-DEFAULT_INPUT_CSV = DATA_DIR / "movie_recommender_test_prompts.csv"
-DEFAULT_OUTPUT_CSV = DATA_DIR / "movie_recommender_test_outputs_direct.csv"
+DEFAULT_INPUT_CSV = DATA_DIR / "movie_recommender_test_prompts2.csv"
+DEFAULT_OUTPUT_CSV = DATA_DIR / "movie_recommender_test_outputs_direct2.csv"
 
 
 def _empty_trace() -> dict[str, Any]:
@@ -146,8 +146,8 @@ def _history_repeat(result: dict[str, Any], title: str, history: list[Any]) -> b
 
 
 def run_case(case_index: int, row: pd.Series) -> dict[str, Any]:
-    prompt = str(row.get("prompt", "")).strip()
-    history = _parse_history(row.get("history", ""))
+    prompt = str(row.get("preference") or row.get("prompt") or "").strip()
+    history = _parse_history(row.get("watch_history", ""))
     started_at = time.perf_counter()
     error = ""
     result: dict[str, Any] = {}
@@ -191,8 +191,8 @@ def run_case(case_index: int, row: pd.Series) -> dict[str, Any]:
 
 def run_benchmark(input_csv: Path, output_csv: Path) -> pd.DataFrame:
     cases = pd.read_csv(input_csv).fillna("")
-    if "prompt" not in cases.columns:
-        raise ValueError(f"{input_csv} must contain a 'prompt' column")
+    if "preference" not in cases.columns and "prompt" not in cases.columns:
+        raise ValueError(f"{input_csv} must contain a 'preference' or 'prompt' column")
 
     rows = []
     for case_index, row in cases.iterrows():
@@ -219,7 +219,7 @@ def run_benchmark(input_csv: Path, output_csv: Path) -> pd.DataFrame:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark llm.get_recommendation() against a prompt CSV.")
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT_CSV, help="CSV with at least a prompt column.")
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT_CSV, help="CSV with at least a preference or prompt column.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_CSV, help="Where to write benchmark results.")
     return parser.parse_args()
 
