@@ -451,9 +451,7 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
 
     def _trim_sentence(text: str, limit: int = 180) -> str:
         trimmed = text[:limit].rstrip()
-        if trimmed.endswith((".", "!", "?")):
-            return trimmed.rstrip(" ,.;:") + "."
-        abbreviations = ("Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.")
+        abbreviations = ("Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "L.A.", "U.S.", "U.K.")
         sentence_break = -1
         for marker in (". ", "! ", "? "):
             search_from = 0
@@ -464,9 +462,14 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
                 prefix = trimmed[max(0, idx - 5) : idx + 1]
                 if not prefix.endswith(abbreviations):
                     sentence_break = idx
+                    break
                 search_from = idx + 1
+            if sentence_break > 40:
+                break
         if sentence_break > 40:
             trimmed = trimmed[: sentence_break + 1]
+            return trimmed.rstrip(" ,.;:") + "."
+        if trimmed.endswith((".", "!", "?")):
             return trimmed.rstrip(" ,.;:") + "."
         last_space = trimmed.rfind(" ")
         if len(text) > limit and last_space > max(20, limit // 2):
@@ -483,6 +486,25 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
             return f"{cleaned[0]} and {cleaned[1]}"
         return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
 
+    def _appeal_phrase() -> str:
+        if keywords:
+            return _natural_list(keywords[:3])
+        genres = [part.strip().lower() for part in str(movie.get("genres") or "").split(",") if part.strip()]
+        return _natural_list(genres[:2])
+
+    def _request_phrase() -> str:
+        tones = prompt_profile.get("tone", [])
+        if tones:
+            return _natural_list([str(item) for item in tones[:2]])
+        if prompt_profile.get("setting_period"):
+            return str(prompt_profile["setting_period"])
+        if prompt_profile.get("target_genres"):
+            return _natural_list([str(item) for item in prompt_profile["target_genres"][:2]])
+        return ""
+
+    def _article_for(text: str) -> str:
+        return "an" if text[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
+
     def _quality_phrase() -> str:
         try:
             rating = float(movie.get("vote_average", 0.0) or 0.0)
@@ -491,38 +513,44 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
             rating = 0.0
             votes = 0
         if rating >= 7.2 and votes >= 1000:
-            return f"It also has solid audience backing at {rating:.1f}/10 from {votes:,} votes."
+            return "There is enough audience love behind it that I would feel comfortable recommending it, not just naming it."
         if rating > 0.0 and votes > 0:
-            return f"Its rating is more modest at {rating:.1f}/10, so I would treat it as the closest available fit rather than a slam-dunk."
-        return "The available rating data is thin here, so I would treat it as a closest-fit backup rather than a confident quality pick."
+            return "This is more of a fit-first pick, so I would go in for the premise rather than expect a universal crowd-pleaser."
+        return "The audience signal is thin, so I would frame this as a fit-first pick rather than a sure thing."
 
+    title = f'"{movie["title"]}"'
+    request_phrase = _request_phrase()
+    appeal_phrase = _appeal_phrase()
     if overview:
-        hook = f'{movie["title"]} gives you this hook: {_trim_sentence(overview)}'
+        if request_phrase:
+            hook = f"I’d point you to {title} because it gives your {request_phrase} request a concrete shape: {_trim_sentence(overview)}"
+        elif appeal_phrase:
+            hook = f"I’d point you to {title}; it has a clear {appeal_phrase} pull from the start: {_trim_sentence(overview)}"
+        else:
+            hook = f"I’d point you to {title}; the setup has an immediate pull: {_trim_sentence(overview)}"
     elif keywords:
-        lead_keywords = _natural_list(keywords[:3])
-        hook = f'{movie["title"]} leans into {lead_keywords} with a setup that is easy to picture right away.'
+        hook = f"I’d point you to {title} for its {appeal_phrase} energy; that gives the pick a sharper identity than a generic fallback."
     else:
-        hook = f'{movie["title"]} has a clear, story-first setup instead of a vague effects reel.'
+        hook = f"I’d point you to {title} because it looks like the cleanest fit in the current shortlist, not just a random safe choice."
 
-    support_line = _quality_phrase()
-    if keywords:
-        lead_keywords = _natural_list(keywords[:3])
-        support_line = f"{support_line} It leans into {lead_keywords}, which gives it a clearer identity than a generic backup pick."
+    wants_quality_context = bool(prompt_profile.get("quality_preference") or prompt_profile.get("rating_constraint"))
+    support_line = _quality_phrase() if wants_quality_context else ""
 
     tones = prompt_profile.get("tone", [])
     if tones:
         reason = ", ".join(tones[:2])
-        fit_line = f"If you want something {reason} right now, this lands better because the appeal comes from the story pressure and mood, not empty spectacle."
+        fit_line = f"If you want something {reason} right now, I’d choose this for the feeling it promises, not just the category it falls into."
     elif prompt_profile.get("setting_period"):
         setting = str(prompt_profile["setting_period"])
-        fit_line = f"If you want a {setting} feel, this is the closest fit in the current shortlist because its setup keeps the story immediate and easy to enter."
+        fit_line = f"For a {setting} feel, it gives you a real atmosphere to step into instead of just matching a label."
     elif prompt_profile["target_genres"]:
-        target = ", ".join(prompt_profile["target_genres"][:2])
-        fit_line = f"If you want something in the {target} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
+        target = _natural_list([str(item) for item in prompt_profile["target_genres"][:2]])
+        fit_line = f"For a {target} request, I’d rather send you toward something with a distinct angle than something that merely checks the genre box."
     elif movie["genres"]:
-        fit_line = f"If you want something in the {movie['genres']} lane, this is a strong bet because the hook is clear and the payoff is easy to picture."
+        genres = _natural_list([part.strip().lower() for part in str(movie["genres"]).split(",") if part.strip()][:2])
+        fit_line = f"If you are browsing in {_article_for(genres)} {genres} mood, this gives you a clearer reason to press play than most filler picks."
     else:
-        fit_line = "If you want something engaging without overthinking it, this gives you a clearer hook than a generic effects-first pick."
+        fit_line = "If you want something without overthinking it, this is the most defensible fallback I can make from the shortlist."
 
     parts = [hook]
     if support_line:

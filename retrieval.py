@@ -1228,6 +1228,7 @@ def build_prompt_profile(preferences: str, retrieval_profile: dict[str, Any]) ->
         "runtime_constraint": retrieval_profile.get("runtime_constraint"),
         "runtime_constraint_unavailable": bool(retrieval_profile.get("runtime_constraint_unavailable")),
         "rating_constraint": retrieval_profile.get("rating_constraint"),
+        "quality_preference": bool(retrieval_profile.get("quality_preference")),
         "setting_period": retrieval_profile.get("setting_period", ""),
         "country_relevant": bool(retrieval_profile.get("country_or_language_signals")),
     }
