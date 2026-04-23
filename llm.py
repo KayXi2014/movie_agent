@@ -38,6 +38,7 @@ from retrieval import (
 TOTAL_REQUEST_BUDGET_SECONDS = 20.0
 FALLBACK_BUFFER_SECONDS = 1.0
 LLM_TIMEOUT_SAFETY_MARGIN_SECONDS = 1.0
+MIN_FINAL_LLM_BUDGET_SECONDS = 2.0
 MODEL = "gemma4:31b-cloud"
 ENABLE_LLM_INTENT = os.getenv("ENABLE_LLM_INTENT", "1") == "1"
 INTENT_LLM_TIMEOUT_S = float(os.getenv("INTENT_LLM_TIMEOUT_S", "2.5"))  # Reduced from 3.5s to preserve budget
@@ -77,17 +78,18 @@ def _check_cancellation() -> None:
 def _build_intent_prompt(preferences: str) -> str:
     genres_text = ", ".join(KNOWN_GENRES)
     return (
-        "JSON only. Extract movie search hints.\n"
-        'Schema: {"genres":[],"avoid":[],"avoid_tone":[],"keyword_hints":[],"release_year":null,"runtime":null,"tone":[],"tone_modifiers":[],"quality_preference":false,"language":[]}\n'
+        "JSON only. Extract ONLY detected movie search constraints. Omit any field with no constraint.\n"
         f"Genres: {genres_text}\n"
         "avoid: negative requirements (e.g., 'no romance' → romance, 'minimal violence' → gore, 'not cheesy' → cliché)\n"
         "avoid_tone: moods to exclude (e.g., 'not depressing' → depressing, 'not slow-paced' → slow-burn)\n"
         "keyword_hints: subgenre/theme terms (courtroom→trial,lawyer; biopic→biography,true story; superhero→comic,powers)\n"
         "tone_modifiers: subtype qualifiers like psychological, supernatural, gore-heavy, suspense, thriller (for disambiguation)\n"
-        "release_year: {min,max,label} for year constraints (e.g., '80s movie' → {min:1980,max:1989})\n"
-        "runtime: {max,label} for length constraints\n"
+        "release_year: {min,max} for year constraints (e.g., '80s movie' → {min:1980,max:1989})\n"
+        "runtime: {min,max} for length constraints\n"
         "language: target language/country (e.g., 'Spanish film' → Spanish, 'Korean thriller' → Korean)\n"
+        'IMPORTANT: Return ONLY the fields where you detected constraints. Skip empty arrays and null objects.\n'
         'Ex: "courtroom drama not too dark" -> {"genres":["Drama"],"avoid_tone":["dark"],"keyword_hints":["courtroom","trial","legal"]}\n'
+        'Ex: "Korean thriller" -> {"genres":["Thriller"],"language":["Korean"]}\n'
         f"Request: {preferences}"
     )
 
@@ -345,6 +347,18 @@ def _resolve_selected_tmdb_id(selection_payload: dict[str, Any], shortlist: list
     raise ValueError(f"Model did not return a usable shortlist selection: {selection_payload}")
 
 
+def _normalize_model_response_text(text: Any) -> str:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        first_newline = raw.find("\n")
+        if first_newline != -1:
+            raw = raw[first_newline + 1 :]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+    return raw
+
+
 def _build_selection_prompt(
     preferences: str,
     shortlist: list[dict[str, Any]],
@@ -459,7 +473,7 @@ def _build_selection_prompt(
             "Rules: Pick from candidates only. Honor constraints. Quality signal is tie-breaker.",
             'Return ONLY JSON. No markdown, no commentary, no code fences.',
             'Return JSON: {"tmdb_id": <id>, "description": "<one short paragraph, under 220 chars>"}',
-            "Description style: concise, direct, and specific. Use at most 1-2 sentences. Never explain your reasoning outside the JSON.",
+            "Description style: write like you are recommending a movie to a friend you know well, but keep the tone calm and measured. Be warm, personal, and specific about why they would enjoy it. Use 'you' and 'your' naturally, but avoid hype, exclamation points, or overly enthusiastic wording. Aim for phrasing like 'would be a great fit for you' or 'this should work well for you'. Focus on the film's vibe, emotional pull, standout premise, or what makes it worth your time. Keep it to 1-2 concise sentences. If the shortlist does not perfectly match the request, acknowledge that in one brief clause, then immediately pivot to why this movie is still interesting or appealing. Never lead with an apology or say 'closest available pick'. Never explain your reasoning outside the JSON.",
             "",
             "Candidates:",
             shortlist_text,
@@ -508,7 +522,7 @@ def _build_description_only_prompt(
         [
             f"Movie: {' | '.join(details)}",
             'Return JSON: {"description": "<2-3 persuasive sentences, under 500 chars>"}',
-            "Style: Write like you're recommending this to a friend - warm, genuine, and specific. Use 'you' and 'your' to make it personal. Hook them with plot details, emotional beats, or the unique vibe. Vary your phrasing. Skip generic praise and rating numbers. If the movie doesn't perfectly match their request, acknowledge that honestly and explain why it's still worth watching.",
+            "Style: Write like you're recommending this to a friend, but keep it measured rather than hyped. Be warm, personal, and appealing. Use 'you' and 'your' naturally, but avoid over-enthusiastic language. Aim for phrasing like 'would be a good fit for you' or 'this is likely to work well for you'. Sell the movie through the vibe, emotional stakes, chemistry, tension, humor, or the specific details that make it feel worth your time. Vary your phrasing. Skip generic praise and rating numbers. If the movie doesn't perfectly match their request, acknowledge that in a single short clause, then focus on what makes the movie appealing anyway.",
         ]
     )
     return "\n".join(sections)
@@ -537,6 +551,8 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
         and not prompt_profile.get("year_relevant")
         and not prompt_profile.get("setting_period")
         and not prompt_profile.get("quality_preference")
+        and not prompt_profile.get("country_relevant")
+        and not prompt_profile.get("keyword_hints")
     )
 
     def _trim_sentence(text: str, limit: int = 180) -> str:
@@ -588,6 +604,9 @@ def _fallback_description(movie: dict[str, Any], prompt_profile: dict[str, Any])
             return _natural_list([str(item) for item in tones[:2]])
         if prompt_profile.get("setting_period"):
             return str(prompt_profile["setting_period"])
+        country_signals = prompt_profile.get("country_or_language_signals", [])
+        if country_signals:
+            return _natural_list([str(item) for item in country_signals[:2]])
         if prompt_profile.get("target_genres"):
             return _natural_list([str(item) for item in prompt_profile["target_genres"][:2]])
         return ""
@@ -819,6 +838,7 @@ def _choose_with_llm(
     preferences: str,
     shortlist: list[dict[str, Any]],
     history_exclusion_text: str,
+    prompt_profile: dict[str, Any],
     timeout_seconds: float,
     force_include_director: bool = False,
     force_include_cast: bool = False,
@@ -844,24 +864,19 @@ def _choose_with_llm(
         options=_final_llm_options(),
     )
 
-    payload = _extract_json_object(response.message.content)
+    raw_response = _normalize_model_response_text(response.message.content)
+    try:
+        payload = _extract_json_object(raw_response)
+    except ValueError:
+        payload = {}
     selection_payload = payload.get("selection") if isinstance(payload.get("selection"), dict) else payload
 
     try:
         tmdb_id = _resolve_selected_tmdb_id(selection_payload, shortlist)
     except ValueError:
         tmdb_id = int(shortlist[0]["tmdb_id"])
-        fallback_title = shortlist[0]["title"]
-        raw_description = str(selection_payload.get("description", "") or "").strip()
-        if raw_description:
-            selection_payload["description"] = (
-                f"{raw_description} The closest available pick from this shortlist is {fallback_title}."
-            )
-        else:
-            selection_payload["description"] = (
-                f"I do not see a perfect match for every constraint in the available shortlist, "
-                f"so the closest available pick is {fallback_title}."
-            )
+        fallback_movie = shortlist[0]
+        selection_payload["description"] = _fallback_description(fallback_movie, prompt_profile)
 
     description = str(selection_payload.get("description", "")).strip()
     result = {
@@ -875,6 +890,7 @@ def _describe_selected_movie(
     preferences: str,
     movie: dict[str, Any],
     history_exclusion_text: str,
+    prompt_profile: dict[str, Any],
     timeout_seconds: float,
     setting_period: str = "",
 ) -> tuple[dict[str, Any], int]:
@@ -886,10 +902,14 @@ def _describe_selected_movie(
         format="json",
         options=_description_llm_options(),
     )
-    payload = _extract_json_object(response.message.content)
-    description = str(payload.get("description", "")).strip()
+    raw_response = _normalize_model_response_text(response.message.content)
+    try:
+        payload = _extract_json_object(raw_response)
+        description = str(payload.get("description", "")).strip()
+    except ValueError:
+        description = _fallback_description(movie, prompt_profile)
     if not description:
-        raise ValueError("Description-only response was empty")
+        description = _fallback_description(movie, prompt_profile)
     return {"tmdb_id": int(movie["tmdb_id"]), "description": description[:500]}, len(prompt)
 
 
@@ -988,14 +1008,25 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
     llm_elapsed = 0.0
     try:
         llm_timeout_seconds = _remaining_llm_timeout_seconds(started_at)
-        if llm_timeout_seconds <= 0.5:
-            raise TimeoutError("Not enough request budget left for LLM selection")
+        if llm_timeout_seconds < MIN_FINAL_LLM_BUDGET_SECONDS:
+            logger.warning(
+                "Budget exhausted before final LLM: remaining=%.2fs threshold=%.2fs",
+                llm_timeout_seconds,
+                MIN_FINAL_LLM_BUDGET_SECONDS,
+            )
+            best = _safe_fallback_movie(shortlist)
+            return {
+                "tmdb_id": best["tmdb_id"],
+                "description": _fallback_description(best, prompt_profile),
+                "used_llm": False,
+            }
         llm_started = time.perf_counter()
         if route == "description_only":
             result, prompt_chars = _describe_selected_movie(
                 preferences,
                 shortlist[0],
                 retrieval_profile["history_exclusion_text"],
+                prompt_profile=prompt_profile,
                 timeout_seconds=llm_timeout_seconds,
                 setting_period=setting_period,
             )
@@ -1004,6 +1035,7 @@ def _get_recommendation_cached(preferences: str, history: tuple[tuple[int | None
                 preferences,
                 llm_shortlist,
                 retrieval_profile["history_exclusion_text"],
+                prompt_profile=prompt_profile,
                 timeout_seconds=llm_timeout_seconds,
                 force_include_director=force_include_person_fields,
                 force_include_cast=force_include_person_fields,

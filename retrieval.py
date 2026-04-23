@@ -1876,7 +1876,7 @@ def has_language_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> boo
     movie_countries = normalize_text(row.get("production_countries", ""))
     if lang_codes and movie_lang in lang_codes:
         return True
-    if country_names and any(country in movie_countries for country in country_names):
+    if country_names and not lang_codes and any(country in movie_countries for country in country_names):
         return True
     return False
 
@@ -2004,7 +2004,7 @@ def compute_source_scores_vectorized(candidates: pd.DataFrame, retrieval_profile
             movie_lang = normalize_text(str(orig_languages[i]))
             movie_countries = normalize_text(str(prod_countries[i]))
             has_lang = movie_lang in lang_codes if lang_codes else False
-            has_country = any(c in movie_countries for c in country_names) if country_names else False
+            has_country = any(c in movie_countries for c in country_names) if country_names and not lang_codes else False
             if not has_lang and not has_country:
                 scores[i] = -5_000.0
                 continue

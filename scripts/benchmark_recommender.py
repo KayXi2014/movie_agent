@@ -132,7 +132,7 @@ def _lookup_title(tmdb_id: Any) -> str:
 
 
 def _parse_history(raw_history: Any) -> list[Any]:
-    """Accept optional history cells as JSON, Python lists, or comma text."""
+    """Accept optional history cells as JSON, Python lists, or text (semicolon or comma separated)."""
     if raw_history is None or pd.isna(raw_history):
         return []
     if isinstance(raw_history, list):
@@ -153,6 +153,11 @@ def _parse_history(raw_history: Any) -> list[Any]:
         if isinstance(parsed, str) and parsed.strip():
             return [parsed.strip()]
 
+    # Try semicolon split first (movie titles often have semicolons)
+    if ";" in text:
+        return [item.strip() for item in text.split(";") if item.strip()]
+    
+    # Fall back to comma split
     return [item.strip() for item in text.split(",") if item.strip()]
 
 
