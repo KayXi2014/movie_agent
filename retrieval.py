@@ -19,7 +19,7 @@ SEMANTIC_LIMIT = 30
 MERGED_POOL_SIZE = 60
 SECOND_STAGE_POOL_SIZE = 36
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-ENABLE_HF_SEMANTIC_RETRIEVAL = os.getenv("ENABLE_HF_SEMANTIC_RETRIEVAL", "0") == "1"
+ENABLE_HF_SEMANTIC_RETRIEVAL = os.getenv("ENABLE_HF_SEMANTIC_RETRIEVAL", "1") == "1"
 RRF_K = 60.0
 MAX_OVERVIEW_KEYWORDS = 18
 
@@ -191,20 +191,157 @@ GENRE_ALIASES = {
     "animated": "animation",
     "comedy": "comedy",
     "crime": "crime",
+    "doc": "documentary",
+    "documentary": "documentary",
+    "documentaries": "documentary",
     "drama": "drama",
     "family": "family",
     "fantasy": "fantasy",
     "history": "history",
+    "historical": "history",
     "horror": "horror",
+    "scary": "horror",
+    "spooky": "horror",
+    "creepy": "horror",
+    "frightening": "horror",
+    "music": "music",
+    "musical": "music",
     "mystery": "mystery",
     "romance": "romance",
     "romantic": "romance",
     "sci fi": "science fiction",
     "sci-fi": "science fiction",
+    "scifi": "science fiction",
     "science fiction": "science fiction",
     "thriller": "thriller",
     "war": "war",
     "western": "western",
+}
+SUBGENRE_KEYWORDS: dict[str, set[str]] = {
+    "courtroom": {"trial", "courthouse", "lawyer", "verdict", "jury", "legal", "court case", "attorney", "judge", "prosecution"},
+    "biopic": {"biography", "biographical", "based on true story", "true story", "real life"},
+    "biographical": {"biography", "biographical", "based on true story", "true story", "real life"},
+    "superhero": {"superhero", "based on comic", "comic book", "superpower", "vigilante", "masked hero"},
+    "heist": {"robbery", "theft", "steal", "con artist", "bank robbery", "casino", "thief", "caper"},
+    "sports": {"athlete", "championship", "coach", "team", "tournament", "boxing", "football", "basketball", "baseball", "soccer", "olympics"},
+    "sport": {"athlete", "championship", "coach", "team", "tournament", "boxing", "football", "basketball", "baseball", "soccer", "olympics"},
+    "slasher": {"serial killer", "masked killer", "slasher", "murder", "killer"},
+    "zombie": {"zombie", "undead", "infection", "apocalypse", "outbreak"},
+    "vampire": {"vampire", "blood", "undead", "immortal"},
+    "psychological": {"psychological", "mind", "mental", "paranoia", "psyche", "delusion"},
+    "noir": {"noir", "detective", "femme fatale", "hard-boiled", "cynical"},
+    "coming of age": {"coming of age", "adolescence", "teenager", "growing up", "youth", "high school"},
+    "coming-of-age": {"coming of age", "adolescence", "teenager", "growing up", "youth", "high school"},
+    "indie": {"independent film", "indie", "arthouse", "art house", "low budget", "sundance"},
+    "independent": {"independent film", "indie", "arthouse", "art house", "low budget", "sundance"},
+    "martial arts": {"martial arts", "kung fu", "karate", "fighting", "combat"},
+    "time travel": {"time travel", "time machine", "temporal", "time loop"},
+    "disaster": {"disaster", "catastrophe", "survival", "natural disaster", "apocalypse"},
+    "spy": {"spy", "espionage", "secret agent", "undercover", "intelligence"},
+}
+
+# Language/origin filter mappings - maps user terms to (language_codes, country_names)
+LANGUAGE_FILTER_MAP: dict[str, tuple[set[str], set[str]]] = {
+    # East Asian
+    "korean": ({"ko"}, {"south korea"}),
+    "k-drama": ({"ko"}, {"south korea"}),
+    "kdrama": ({"ko"}, {"south korea"}),
+    "japanese": ({"ja"}, {"japan"}),
+    "j-horror": ({"ja"}, {"japan"}),
+    "jdrama": ({"ja"}, {"japan"}),
+    "anime": ({"ja"}, {"japan"}),
+    "chinese": ({"zh", "cn"}, {"china", "hong kong", "taiwan"}),
+    "mandarin": ({"zh", "cn"}, {"china"}),
+    "cantonese": ({"zh"}, {"hong kong"}),
+    "taiwanese": ({"zh"}, {"taiwan"}),
+    "chinese cinema": ({"zh", "cn"}, {"china", "hong kong", "taiwan"}),
+    # Southeast Asian
+    "thai": ({"th"}, {"thailand"}),
+    "vietnamese": ({"vi"}, {"vietnam"}),
+    "philippine": ({"fil"}, {"philippines"}),
+    "filipin": ({"fil"}, {"philippines"}),
+    "malaysian": ({"ms"}, {"malaysia"}),
+    "singapore": ({"zh", "en"}, {"singapore"}),
+    "thai cinema": ({"th"}, {"thailand"}),
+    # South Asian
+    "indian": ({"hi", "te", "ta", "ml", "bn", "ur"}, {"india"}),
+    "bollywood": ({"hi"}, {"india"}),
+    "tamil": ({"ta"}, {"india"}),
+    "telugu": ({"te"}, {"india"}),
+    "malayalam": ({"ml"}, {"india"}),
+    "bengali": ({"bn"}, {"india"}),
+    "urdu": ({"ur"}, {"india", "pakistan"}),
+    "pakistani": ({"ur"}, {"pakistan"}),
+    # European
+    "french": ({"fr"}, {"france", "belgium"}),
+    "german": ({"de"}, {"germany", "austria"}),
+    "austrian": ({"de"}, {"austria"}),
+    "british": ({"en"}, {"united kingdom"}),
+    "italian": ({"it"}, {"italy"}),
+    "spanish": ({"es"}, {"spain", "mexico", "argentina", "colombia"}),
+    "spanish cinema": ({"es"}, {"spain"}),
+    "latin american": ({"es"}, {"mexico", "argentina", "colombia", "chile", "peru"}),
+    "mexican": ({"es"}, {"mexico"}),
+    "argentinian": ({"es"}, {"argentina"}),
+    "colombian": ({"es"}, {"colombia"}),
+    "portuguese": ({"pt"}, {"portugal", "brazil"}),
+    "brazilian": ({"pt"}, {"brazil"}),
+    "polish": ({"pl"}, {"poland"}),
+    "czech": ({"cs"}, {"czech republic"}),
+    "hungarian": ({"hu"}, {"hungary"}),
+    "romanian": ({"ro"}, {"romania"}),
+    "greek": ({"el"}, {"greece"}),
+    "scandinavian": ({"no", "da", "fi", "sv", "is"}, {"sweden", "norway", "denmark", "finland", "iceland"}),
+    "swedish": ({"sv"}, {"sweden"}),
+    "norwegian": ({"no"}, {"norway"}),
+    "danish": ({"da"}, {"denmark"}),
+    "finnish": ({"fi"}, {"finland"}),
+    "icelandic": ({"is"}, {"iceland"}),
+    "dutch": ({"nl"}, {"netherlands", "belgium"}),
+    "belgian": ({"nl", "fr"}, {"belgium"}),
+    "russian": ({"ru"}, {"russia", "soviet union"}),
+    "soviet": ({"ru"}, {"soviet union"}),
+    "ukrainian": ({"uk"}, {"ukraine"}),
+    # Middle Eastern & North African
+    "arabic": ({"ar"}, {"egypt", "lebanon", "uae", "saudi arabia", "jordan", "iraq"}),
+    "middle eastern": ({"ar"}, {"egypt", "lebanon", "uae", "saudi arabia", "jordan"}),
+    "hebrew": ({"he"}, {"israel"}),
+    "israeli": ({"he"}, {"israel"}),
+    "turkish": ({"tr"}, {"turkey"}),
+    "farsi": ({"fa"}, {"iran"}),
+    "persian": ({"fa"}, {"iran"}),
+    "iranian": ({"fa"}, {"iran"}),
+    # African
+    "nigerian": (set(), {"nigeria"}),
+    "nollywood": (set(), {"nigeria"}),
+    "south african": (set(), {"south africa"}),
+    "african cinema": (set(), {"nigeria", "south africa", "senegal", "kenya"}),
+    # Americas
+    "dutch": ({"nl"}, {"netherlands", "belgium"}),
+    "caribbean": ({"es", "en"}, {"cuba", "puerto rico"}),
+    # Meta-categories
+    "foreign": ({"ko", "ja", "fr", "zh", "cn", "es", "de", "it", "hi", "ru", "th", "vi"}, set()),
+    "international": ({"ko", "ja", "fr", "zh", "cn", "es", "de", "it", "hi", "ru", "th", "vi"}, set()),
+    "subtitled": ({"ko", "ja", "fr", "zh", "cn", "es", "de", "it", "hi", "ru", "th", "vi"}, set()),
+    "dubbed": (set(), set()),  # Will require checking dubbed language info
+    "original language": (set(), set()),  # Placeholder for original language preference
+}
+
+# Rating filter mappings - maps user terms to allowed ratings
+RATING_FILTER_MAP: dict[str, set[str]] = {
+    "family friendly": {"g", "pg"},
+    "family-friendly": {"g", "pg"},
+    "kid friendly": {"g", "pg"},
+    "kid-friendly": {"g", "pg"},
+    "kids": {"g", "pg"},
+    "children": {"g"},
+    "pg": {"pg"},
+    "pg-13": {"pg-13"},
+    "pg13": {"pg-13"},
+    "r-rated": {"r"},
+    "r rated": {"r"},
+    "adult": {"r", "nc-17"},
+    "mature": {"r", "nc-17"},
 }
 YEAR_SIGNAL_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b(?:19|20)\d0s\b|\b(?:80s|90s|2000s|2010s|2020s)\b", re.IGNORECASE)
 YEAR_SIGNAL_PHRASES = (
@@ -267,6 +404,21 @@ def extract_year_constraint(preferences: str) -> dict[str, Any] | None:
     if short_decade:
         start = 1900 + int(short_decade.group(1))
         return {"min_year": start, "max_year": start + 9, "label": f"{start}s"}
+
+    # Handle relative year phrases like "recent", "older", "classic"
+    if re.search(r"\b(?:recent|newer|latest|this decade|last decade)\b", normalized):
+        current_year = 2024
+        if re.search(r"\b(?:recent|newer|latest)\b", normalized):
+            return {"min_year": current_year - 5, "max_year": current_year, "label": "recent"}
+        if re.search(r"\bthis decade\b", normalized):
+            return {"min_year": 2020, "max_year": current_year, "label": "this decade"}
+        if re.search(r"\blast decade\b", normalized):
+            return {"min_year": 2010, "max_year": 2019, "label": "last decade"}
+    
+    if re.search(r"\b(?:older|classic)\b", normalized):
+        if re.search(r"\b(?:classic|old)\b", normalized):
+            return {"min_year": 0, "max_year": 1990, "label": "classic"}
+        return {"min_year": 0, "max_year": 2010, "label": "older"}
 
     year_match = re.search(r"\b((?:19|20)\d{2})\b", normalized)
     if not year_match:
@@ -359,6 +511,31 @@ def extract_rating_constraint(preferences: str) -> dict[str, Any] | None:
     if min_rating <= 0.0 or min_rating > 10.0:
         return None
     return {"min_rating": min_rating, "label": f"rating at least {min_rating:g}/10"}
+
+
+def extract_language_filter(preferences: str) -> dict[str, Any] | None:
+    """Extract language/country filter from preferences. Returns filter criteria, not boost signals."""
+    normalized = normalize_text(preferences)
+    for term, (lang_codes, countries) in LANGUAGE_FILTER_MAP.items():
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized):
+            return {
+                "language_codes": lang_codes,
+                "country_names": {c.lower() for c in countries},
+                "label": term,
+            }
+    return None
+
+
+def extract_content_rating_filter(preferences: str) -> dict[str, Any] | None:
+    """Extract content rating filter (family-friendly, R-rated, etc.)."""
+    normalized = normalize_text(preferences)
+    for term, allowed_ratings in RATING_FILTER_MAP.items():
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized):
+            return {
+                "allowed_ratings": {r.lower() for r in allowed_ratings},
+                "label": term,
+            }
+    return None
 
 
 def file_sha256(path: Path) -> str:
@@ -819,14 +996,20 @@ def preference_seed_rows(preferences: str, history_df: pd.DataFrame) -> pd.DataF
         return MOVIES.iloc[0:0].copy()
 
     matched_tmdb_ids: set[int] = set()
-    for row in MOVIES.itertuples():
-        if _normalized_title_mentioned(normalized_preferences, row.title_variants):
-            matched_tmdb_ids.add(int(row.tmdb_id))
 
+    # Use pre-built variant index instead of iterating all movies
+    for variant, tmdb_ids in MOVIES_BY_TITLE_VARIANT.items():
+        if len(variant) < 3:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", normalized_preferences):
+            matched_tmdb_ids.update(tmdb_ids)
+
+    # For history movies, use numpy arrays to avoid pandas overhead
     if not history_df.empty:
-        for row in history_df.itertuples():
-            if _normalized_title_mentioned(normalized_preferences, row.title_variants):
-                matched_tmdb_ids.add(int(row.tmdb_id))
+        history_variants = history_df["title_variants"].values
+        for i in range(len(history_df)):
+            if _normalized_title_mentioned(normalized_preferences, history_variants[i]):
+                matched_tmdb_ids.add(int(history_df.iloc[i]["tmdb_id"]))
 
     if not matched_tmdb_ids:
         return MOVIES.iloc[0:0].copy()
@@ -834,6 +1017,27 @@ def preference_seed_rows(preferences: str, history_df: pd.DataFrame) -> pd.DataF
 
 
 def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
+    if seed_df.empty:
+        return {
+            "seed_titles": [],
+            "seed_tmdb_ids": set(),
+            "seed_title_roots": set(),
+            "seed_genres": set(),
+            "seed_keywords": set(),
+            "seed_title_tokens": set(),
+            "seed_similar_ids": set(),
+            "seed_recommended_ids": set(),
+        }
+
+    # Use numpy arrays to avoid pandas overhead
+    genres_sets = seed_df["genres_set"].values
+    keywords_sets = seed_df["keywords_set"].values
+    titles = seed_df["title"].values
+    similar_ids_sets = seed_df["similar_ids_set"].values
+    recommended_ids_sets = seed_df["recommended_ids_set"].values
+    tmdb_ids = seed_df["tmdb_id"].values
+    title_roots = seed_df["title_root"].values
+
     seed_genres: set[str] = set()
     seed_keywords: set[str] = set()
     seed_title_tokens: set[str] = set()
@@ -843,16 +1047,16 @@ def derive_seed_signals(seed_df: pd.DataFrame) -> dict[str, Any]:
     seed_title_roots: set[str] = set()
     seed_titles: list[str] = []
 
-    for row in seed_df.itertuples():
-        seed_genres.update(row.genres_set)
-        seed_keywords.update(set(sorted(row.keywords_set)[:10]))
-        seed_title_tokens.update(tokenize(row.title))
-        seed_similar_ids.update(row.similar_ids_set)
-        seed_recommended_ids.update(row.recommended_ids_set)
-        seed_tmdb_ids.add(int(row.tmdb_id))
-        if row.title_root:
-            seed_title_roots.add(row.title_root)
-        seed_titles.append(str(row.title))
+    for i in range(len(seed_df)):
+        seed_genres.update(genres_sets[i])
+        seed_keywords.update(set(sorted(keywords_sets[i])[:10]))
+        seed_title_tokens.update(tokenize(titles[i]))
+        seed_similar_ids.update(similar_ids_sets[i])
+        seed_recommended_ids.update(recommended_ids_sets[i])
+        seed_tmdb_ids.add(int(tmdb_ids[i]))
+        if title_roots[i]:
+            seed_title_roots.add(title_roots[i])
+        seed_titles.append(str(titles[i]))
 
     return {
         "seed_titles": seed_titles,
@@ -954,6 +1158,16 @@ def extract_country_or_language_signals(preferences: str) -> list[str]:
     return matches[:3]
 
 
+def extract_subgenre_signals(preferences: str) -> dict[str, set[str]]:
+    """Extract subgenre terms and their associated keywords from preferences."""
+    normalized = normalize_text(preferences)
+    result: dict[str, set[str]] = {}
+    for subgenre, keywords in SUBGENRE_KEYWORDS.items():
+        if _phrase_mentioned(normalized, subgenre):
+            result[subgenre] = keywords
+    return result
+
+
 def extract_affinity_phrases(preferences: str) -> list[str]:
     normalized = normalize_text(preferences)
     phrases: list[str] = []
@@ -975,15 +1189,18 @@ def derive_affinity_terms(phrases: list[str], negative_match_tokens: set[str]) -
         normalized_phrase = normalize_text(phrase)
         if not normalized_phrase:
             continue
-        phrase_tokens = match_tokens(normalized_phrase)
-        matching_movies = MOVIES[MOVIES["search_blob"].map(lambda blob: normalized_phrase in blob)].head(40)
+        # Use str.contains with regex=False for faster substring search
+        matching_movies = MOVIES[MOVIES["search_blob"].str.contains(normalized_phrase, regex=False, na=False)].head(40)
         if matching_movies.empty:
             continue
-        for row in matching_movies.itertuples():
-            for genre in row.genres_set:
+        # Use numpy arrays to avoid pandas row access overhead
+        genres_sets = matching_movies["genres_set"].values
+        keywords_sets = matching_movies["keywords_set"].values
+        for i in range(len(matching_movies)):
+            for genre in genres_sets[i]:
                 for token in match_tokens(genre):
                     terms[token] += 3
-            for keyword in sorted(row.keywords_set)[:10]:
+            for keyword in sorted(keywords_sets[i])[:10]:
                 for token in match_tokens(keyword):
                     terms[token] += 1
     for token in set(terms):
@@ -1010,9 +1227,12 @@ def build_retrieval_profile(
     rating_constraint = extract_rating_constraint(preferences)
     setting_period = extract_setting_period(preferences)
     country_or_language_signals = extract_country_or_language_signals(preferences)
+    language_filter = extract_language_filter(preferences)
+    content_rating_filter = extract_content_rating_filter(preferences)
     quality_preference = extract_quality_preference(preferences)
     all_time_quality_preference = extract_all_time_quality_preference(preferences)
     direct_mood_request = any(pattern.search(str(preferences or "")) for pattern, _ in MOOD_QUERY_HINTS)
+    subgenre_signals = extract_subgenre_signals(preferences)
 
     positive_query_tokens = set(negation_context["positive_query_tokens"])
     positive_query_tokens.difference_update(seed_signals["seed_title_tokens"])
@@ -1043,6 +1263,13 @@ def build_retrieval_profile(
         if match_tokens(genre).intersection(affinity_query_terms)
     }
     negative_tokens = set(negation_context["negative_tokens"])
+
+    # Add subgenre keywords to positive query tokens for better BM25 matching
+    subgenre_keyword_set: set[str] = set()
+    for subgenre, keywords in subgenre_signals.items():
+        subgenre_keyword_set.update(keywords)
+        for keyword in keywords:
+            positive_query_tokens.update(tokenize(keyword))
 
     lexical_query_text = " ".join(sorted(positive_query_tokens))
     semantic_query_text = str(preferences or "").strip()
@@ -1081,6 +1308,10 @@ def build_retrieval_profile(
         "affinity_phrases": affinity_phrases,
         "affinity_genre_targets": affinity_genre_targets,
         "country_or_language_signals": country_or_language_signals,
+        "language_filter": language_filter,
+        "content_rating_filter": content_rating_filter,
+        "subgenre_signals": subgenre_signals,
+        "subgenre_keywords": subgenre_keyword_set,
         "year_constraint_unavailable": False,
         "runtime_constraint_unavailable": False,
         "candidate_constraint_note": "",
@@ -1490,19 +1721,36 @@ def search_optional_semantic(
     import time
 
     started = time.perf_counter()
+    MAX_SEMANTIC_TIMEOUT_S = 4.5  # Strict timeout to preserve LLM budget
     try:
         from semantic_retrieval import search_semantic, semantic_runtime_status
 
         if not semantic_runtime_status().get("ready"):
             return [], False, time.perf_counter() - started
+        
+        # Early exit if semantic search is taking too long (budget protection)
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.5 and not hasattr(search_optional_semantic, '_warned_semantic_startup'):
+            import logging
+            logging.getLogger(__name__).debug("Semantic model startup took %.2fs", elapsed)
+            search_optional_semantic._warned_semantic_startup = True
+        
         hits = search_semantic(
             str(retrieval_profile.get("semantic_query_text") or retrieval_profile.get("lexical_query_text") or ""),
             exclude_ids=exclude_ids,
             limit=SEMANTIC_LIMIT,
         )
-        return hits, True, time.perf_counter() - started
-    except Exception:
-        return [], False, time.perf_counter() - started
+        elapsed_total = time.perf_counter() - started
+        if elapsed_total > MAX_SEMANTIC_TIMEOUT_S:
+            import logging
+            logging.getLogger(__name__).warning("Semantic search exceeded %.1fs budget (took %.2fs)", MAX_SEMANTIC_TIMEOUT_S, elapsed_total)
+        return hits, True, elapsed_total
+    except Exception as exc:
+        elapsed_total = time.perf_counter() - started
+        if elapsed_total > MAX_SEMANTIC_TIMEOUT_S:
+            import logging
+            logging.getLogger(__name__).warning("Semantic search error after %.2fs: %s", elapsed_total, exc)
+        return [], False, elapsed_total
 
 
 def quality_prior_score(row: pd.Series) -> float:
@@ -1617,6 +1865,34 @@ def has_seed_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
     )
 
 
+def has_language_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    """Check if movie matches language/country filter. Returns True if no filter or matches."""
+    lang_filter = retrieval_profile.get("language_filter")
+    if not lang_filter:
+        return True
+    lang_codes = lang_filter.get("language_codes", set())
+    country_names = lang_filter.get("country_names", set())
+    movie_lang = normalize_text(row.get("original_language", ""))
+    movie_countries = normalize_text(row.get("production_countries", ""))
+    if lang_codes and movie_lang in lang_codes:
+        return True
+    if country_names and any(country in movie_countries for country in country_names):
+        return True
+    return False
+
+
+def has_content_rating_match(row: pd.Series, retrieval_profile: dict[str, Any]) -> bool:
+    """Check if movie matches content rating filter. Returns True if no filter or matches."""
+    rating_filter = retrieval_profile.get("content_rating_filter")
+    if not rating_filter:
+        return True
+    allowed_ratings = rating_filter.get("allowed_ratings", set())
+    movie_rating = normalize_text(row.get("us_rating", ""))
+    if not movie_rating or movie_rating == "nr":
+        return False
+    return movie_rating in allowed_ratings
+
+
 def _rank_source_component(rank: Any) -> float:
     try:
         rank_value = float(rank)
@@ -1627,9 +1903,210 @@ def _rank_source_component(rank: Any) -> float:
     return 30.0 / (RRF_K + rank_value)
 
 
+def compute_source_scores_vectorized(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.Series:
+    """Vectorized computation of source scores for all candidates at once.
+
+    This replaces the slow .apply(candidate_source_score, axis=1) pattern.
+    """
+    if candidates.empty:
+        return pd.Series(dtype=float)
+
+    n = len(candidates)
+    scores = np.zeros(n, dtype=np.float64)
+
+    # Pre-extract profile values for speed
+    history_ids = retrieval_profile["history_tmdb_ids"]
+    history_titles = retrieval_profile["history_titles"]
+    exclude_seed_ids = retrieval_profile.get("exclude_seed_tmdb_ids", set())
+    hard_block_genres = retrieval_profile["hard_block_genres"]
+    negative_match_tokens = retrieval_profile["negative_match_tokens"]
+    negative_phrases = retrieval_profile["negative_phrases"]
+    explicit_genre_targets = retrieval_profile["explicit_genre_targets"]
+    named_person_signals = set(retrieval_profile.get("named_person_signals", []))
+    seed_similar_ids = retrieval_profile.get("seed_similar_ids", set())
+    seed_recommended_ids = retrieval_profile.get("seed_recommended_ids", set())
+    seed_genres = retrieval_profile.get("seed_genres", set())
+    seed_keywords = retrieval_profile.get("seed_keywords", set())
+    subgenre_keywords = retrieval_profile.get("subgenre_keywords", set())
+    year_constraint = retrieval_profile.get("year_constraint")
+    runtime_constraint = retrieval_profile.get("runtime_constraint")
+    lang_filter = retrieval_profile.get("language_filter")
+    rating_filter = retrieval_profile.get("content_rating_filter")
+    similarity_request = retrieval_profile.get("similarity_request")
+    quality_pref = retrieval_profile.get("quality_preference")
+    has_subgenre_request = bool(subgenre_keywords)
+
+    # Determine quality weight once (constant for all rows)
+    if quality_pref:
+        quality_weight = 0.28 if has_subgenre_request else 0.35
+    elif is_broad_quality_request(retrieval_profile):
+        quality_weight = 0.18 if has_subgenre_request else 0.25
+    elif needs_quality_backup(retrieval_profile):
+        quality_weight = 0.12 if has_subgenre_request else 0.18
+    else:
+        quality_weight = 0.08
+
+    quality_backup_needed = needs_quality_backup(retrieval_profile)
+
+    # Vectorized computations where possible
+    tmdb_ids = candidates["tmdb_id"].values
+    titles = candidates["title"].values
+    genres_sets = candidates["genres_set"].values
+    keywords_sets = candidates["keywords_set"].values
+    director_sets = candidates["director_set"].values
+    cast_sets = candidates["cast_set"].values
+    search_blob_tokens = candidates["search_blob_match_tokens"].values
+    search_blobs = candidates["search_blob"].values
+    bm25_ranks = pd.to_numeric(candidates.get("bm25_rank", pd.Series([0.0] * n)), errors="coerce").fillna(0.0).values
+    semantic_ranks = pd.to_numeric(candidates.get("semantic_rank", pd.Series([0.0] * n)), errors="coerce").fillna(0.0).values
+    seed_relations = candidates.get("seed_relation", pd.Series([""] * n)).fillna("").values
+    constraint_sources = candidates.get("constraint_source", pd.Series([""] * n)).fillna("").values
+    quality_scores = pd.to_numeric(candidates.get("consensus_quality_score", pd.Series([0.0] * n)), errors="coerce").fillna(0.0).values
+
+    # Year/runtime columns
+    years = pd.to_numeric(candidates.get("year", pd.Series([0] * n)), errors="coerce").fillna(0).astype(int).values
+    runtimes = pd.to_numeric(candidates.get("runtime_min", pd.Series([0] * n)), errors="coerce").fillna(0).values
+
+    # Language columns
+    orig_languages = candidates.get("original_language", pd.Series([""] * n)).fillna("").values
+    prod_countries = candidates.get("production_countries", pd.Series([""] * n)).fillna("").values
+    us_ratings = candidates.get("us_rating", pd.Series([""] * n)).fillna("").values
+
+    # Year constraint values
+    min_year = int(year_constraint["min_year"]) if year_constraint else 0
+    max_year = int(year_constraint["max_year"]) if year_constraint else 9999
+    year_unavailable = retrieval_profile.get("year_constraint_unavailable", False)
+
+    # Runtime constraint values
+    max_runtime = float(runtime_constraint.get("max_runtime") or 9999) if runtime_constraint else 9999
+    min_runtime = float(runtime_constraint.get("min_runtime") or 0) if runtime_constraint else 0
+    runtime_unavailable = retrieval_profile.get("runtime_constraint_unavailable", False)
+
+    # Language filter values
+    lang_codes = lang_filter.get("language_codes", set()) if lang_filter else set()
+    country_names = lang_filter.get("country_names", set()) if lang_filter else set()
+
+    # Rating filter values
+    allowed_ratings = rating_filter.get("allowed_ratings", set()) if rating_filter else set()
+
+    # Process each row (still a loop but avoiding pandas Series overhead)
+    for i in range(n):
+        tmdb_id = int(tmdb_ids[i])
+        title = titles[i]
+
+        # Exclusion check
+        if tmdb_id in history_ids or title in history_titles or tmdb_id in exclude_seed_ids:
+            scores[i] = -10_000.0
+            continue
+
+        # Language filter hard penalty
+        if lang_filter:
+            movie_lang = normalize_text(str(orig_languages[i]))
+            movie_countries = normalize_text(str(prod_countries[i]))
+            has_lang = movie_lang in lang_codes if lang_codes else False
+            has_country = any(c in movie_countries for c in country_names) if country_names else False
+            if not has_lang and not has_country:
+                scores[i] = -5_000.0
+                continue
+
+        # Content rating filter hard penalty
+        if rating_filter:
+            movie_rating = normalize_text(str(us_ratings[i]))
+            if not movie_rating or movie_rating == "nr" or movie_rating not in allowed_ratings:
+                scores[i] = -5_000.0
+                continue
+
+        # Base score from ranks (RRF formula)
+        bm25_r = bm25_ranks[i]
+        sem_r = semantic_ranks[i]
+        score = (30.0 / (RRF_K + bm25_r) if bm25_r > 0 else 0.0) + (30.0 / (RRF_K + sem_r) if sem_r > 0 else 0.0)
+
+        # Seed relation bonus
+        seed_rel = str(seed_relations[i])
+        if not seed_rel:
+            if tmdb_id in seed_similar_ids:
+                seed_rel = "similar"
+            elif tmdb_id in seed_recommended_ids:
+                seed_rel = "recommended"
+        if seed_rel == "similar":
+            score += 0.65
+        elif seed_rel == "recommended":
+            score += 0.50
+        elif similarity_request:
+            # Check if has seed match
+            genres = genres_sets[i]
+            keywords = keywords_sets[i]
+            if seed_genres.intersection(genres) or seed_keywords.intersection(keywords):
+                score += 0.12
+
+        # Constraint source bonus
+        cs = str(constraint_sources[i])
+        if cs == "quality":
+            score += 0.45 if quality_backup_needed else 0.35
+        elif cs:
+            score += 0.18
+
+        # Genre target bonus
+        genres = genres_sets[i]
+        if explicit_genre_targets and explicit_genre_targets.intersection(genres):
+            score += 0.10
+
+        # Person match bonus
+        if named_person_signals:
+            directors = director_sets[i]
+            cast = cast_sets[i]
+            if named_person_signals.intersection(directors) or named_person_signals.intersection(cast):
+                score += 0.22
+
+        # Year match bonus
+        if year_constraint and not year_unavailable:
+            y = years[i]
+            if min_year <= y <= max_year:
+                score += 0.08
+
+        # Runtime match bonus
+        if runtime_constraint and not runtime_unavailable:
+            rt = runtimes[i]
+            if min_runtime <= rt <= max_runtime:
+                score += 0.06
+
+        # Subgenre keyword match bonus
+        if subgenre_keywords:
+            keywords = keywords_sets[i]
+            keyword_overlap = len(subgenre_keywords.intersection(keywords))
+            if keyword_overlap > 0:
+                score += 0.12 * min(keyword_overlap, 3)
+
+        # Avoid hit penalty
+        tokens = search_blob_tokens[i]
+        blob = search_blobs[i]
+        has_avoid = bool(
+            negative_match_tokens.intersection(tokens)
+            or any(normalize_text(phrase) in blob for phrase in negative_phrases)
+            or hard_block_genres.intersection(genres)
+        )
+        if has_avoid:
+            score -= 0.35
+
+        # Quality component
+        q = max(0.0, min(float(quality_scores[i]), 1.0))
+        score += quality_weight * q
+
+        scores[i] = max(score, -10_000.0)
+
+    return pd.Series(scores, index=candidates.index)
+
+
 def candidate_source_score(row: pd.Series, retrieval_profile: dict[str, Any]) -> float:
     if excluded_by_profile(row, retrieval_profile):
         return -10_000.0
+
+    # Apply hard filters - language and content rating
+    # These are user-specified constraints that should strongly penalize non-matches
+    if retrieval_profile.get("language_filter") and not has_language_match(row, retrieval_profile):
+        return -5_000.0
+    if retrieval_profile.get("content_rating_filter") and not has_content_rating_match(row, retrieval_profile):
+        return -5_000.0
 
     score = _rank_source_component(row.get("bm25_rank", 0.0)) + _rank_source_component(row.get("semantic_rank", 0.0))
 
@@ -1655,16 +2132,25 @@ def candidate_source_score(row: pd.Series, retrieval_profile: dict[str, Any]) ->
     if retrieval_profile.get("runtime_constraint") and has_runtime_match(row, retrieval_profile):
         score += 0.06
 
+    # Boost for subgenre keyword matches (courtroom, biopic, etc.)
+    subgenre_keywords = retrieval_profile.get("subgenre_keywords", set())
+    if subgenre_keywords:
+        keyword_overlap = len(subgenre_keywords.intersection(row["keywords_set"]))
+        if keyword_overlap > 0:
+            score += 0.12 * min(keyword_overlap, 3)
+
     if has_avoid_hit(row, retrieval_profile):
         score -= 0.35
 
     quality_component = quality_prior_score(row)
+    # Reduce quality bias when subgenre keywords are requested
+    has_subgenre_request = bool(retrieval_profile.get("subgenre_keywords"))
     if retrieval_profile.get("quality_preference"):
-        quality_weight = 0.35
+        quality_weight = 0.28 if has_subgenre_request else 0.35
     elif is_broad_quality_request(retrieval_profile):
-        quality_weight = 0.25
+        quality_weight = 0.18 if has_subgenre_request else 0.25
     elif needs_quality_backup(retrieval_profile):
-        quality_weight = 0.18
+        quality_weight = 0.12 if has_subgenre_request else 0.18
     else:
         quality_weight = 0.08
     score += quality_weight * quality_component
@@ -1676,23 +2162,28 @@ def diversify_candidates(candidates: pd.DataFrame, limit: int) -> pd.DataFrame:
     if candidates.empty:
         return candidates.head(limit)
 
+    # Use numpy arrays directly to avoid pandas overhead
+    title_roots = candidates["title_root"].values
+    indices = candidates.index.tolist()
+
     primary_indices: list[int] = []
     deferred_indices: list[int] = []
     seen_roots: set[str] = set()
 
-    for row in candidates.itertuples():
-        if row.title_root and row.title_root in seen_roots:
-            deferred_indices.append(row.Index)
+    for i, idx in enumerate(indices):
+        root = title_roots[i]
+        if root and root in seen_roots:
+            deferred_indices.append(idx)
             continue
-        primary_indices.append(row.Index)
-        if row.title_root:
-            seen_roots.add(row.title_root)
+        primary_indices.append(idx)
+        if root:
+            seen_roots.add(root)
 
-    indices = primary_indices[:limit]
-    if len(indices) < limit:
-        indices.extend(deferred_indices[: max(0, limit - len(indices))])
+    final_indices = primary_indices[:limit]
+    if len(final_indices) < limit:
+        final_indices.extend(deferred_indices[: max(0, limit - len(final_indices))])
 
-    return candidates.loc[indices].sort_values(["source_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
+    return candidates.loc[final_indices].sort_values(["source_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
 
 
 def filter_semantic_only_candidates(candidates: pd.DataFrame, retrieval_profile: dict[str, Any]) -> pd.DataFrame:
@@ -1884,10 +2375,8 @@ def _append_constraint_matches(
         if existing_mask.any():
             candidates = candidates.copy()
             candidates.loc[existing_mask & (candidates["constraint_source"].astype(str) == ""), "constraint_source"] = source
-            candidates.loc[existing_mask, "source_score"] = candidates[existing_mask].apply(
-                candidate_source_score,
-                axis=1,
-                retrieval_profile=retrieval_profile,
+            candidates.loc[existing_mask, "source_score"] = compute_source_scores_vectorized(
+                candidates[existing_mask], retrieval_profile
             )
         missing = matches[~matches["tmdb_id"].isin(set(candidates["tmdb_id"].astype(int)))].copy()
         if missing.empty:
@@ -1895,7 +2384,7 @@ def _append_constraint_matches(
         missing = _with_empty_recall_scores(missing)
     missing["constraint_source"] = source
     missing["seed_relation"] = missing["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
-    missing["source_score"] = missing.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
+    missing["source_score"] = compute_source_scores_vectorized(missing, retrieval_profile)
     missing = missing.sort_values(
         ["source_score", "consensus_quality_score", "effective_rating", "effective_votes"],
         ascending=False,
@@ -2004,7 +2493,7 @@ def local_fallback_candidates(preferences: str, history: tuple[tuple[int | None,
     retrieval_profile = build_retrieval_profile(preferences, history)
     candidates = _with_empty_recall_scores(MOVIES)
     candidates["seed_relation"] = candidates["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
-    candidates["source_score"] = candidates.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
+    candidates["source_score"] = compute_source_scores_vectorized(candidates, retrieval_profile)
     candidates = candidates.sort_values(["source_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
     return candidates.head(MERGED_POOL_SIZE).copy(), retrieval_profile
 
@@ -2053,7 +2542,7 @@ def build_candidate_pool(
         return fallback, fallback_profile, "local_fallback"
 
     candidates["seed_relation"] = candidates["tmdb_id"].map(lambda value: seed_relation_for_id(int(value), retrieval_profile))
-    candidates["source_score"] = candidates.apply(candidate_source_score, axis=1, retrieval_profile=retrieval_profile)
+    candidates["source_score"] = compute_source_scores_vectorized(candidates, retrieval_profile)
     candidates = candidates.sort_values(["source_score", "retrieval_vote_score", "consensus_quality_score", "effective_rating", "effective_votes"], ascending=False)
     retrieval_profile = dict(retrieval_profile)
     retrieval_profile["lexical_hit_count"] = len(lexical_hits)
@@ -2092,27 +2581,29 @@ def build_shortlist(
     retrieval_profile["retrieval_mode"] = resolved_mode
 
     shortlist = []
-    for row in reranked.head(SHORTLIST_SIZE).itertuples():
-        source_row = reranked.loc[row.Index]
-        evidence = candidate_evidence(source_row, retrieval_profile)
+    top_reranked = reranked.head(SHORTLIST_SIZE)
+    # Use to_dict for efficient row-wise access
+    for idx in top_reranked.index:
+        row = top_reranked.loc[idx]
+        evidence = candidate_evidence(row, retrieval_profile)
         shortlist.append(
             {
-                "tmdb_id": int(row.tmdb_id),
-                "title": row.title,
-                "score": round(float(getattr(row, "source_score", 0.0)), 3),
-                "source_score": round(float(getattr(row, "source_score", 0.0)), 3),
-                "semantic_score": round(float(getattr(row, "semantic_score", 0.0)), 3),
-                "bm25_score": round(float(getattr(row, "bm25_score", 0.0)), 3),
-                "bm25_rank": int(float(getattr(row, "bm25_rank", 0.0))),
-                "semantic_rank": int(float(getattr(row, "semantic_rank", 0.0))),
-                "seed_relation": str(getattr(row, "seed_relation", "") or ""),
-                "constraint_source": str(getattr(row, "constraint_source", "") or ""),
-                "retrieval_vote_score": round(float(getattr(row, "retrieval_vote_score", 0.0)), 3),
-                "vote_average": round(float(row.vote_average), 3),
-                "vote_count": int(row.vote_count),
-                "effective_rating": round(float(getattr(row, "effective_rating", row.vote_average)), 3),
-                "effective_votes": int(float(getattr(row, "effective_votes", row.vote_count))),
-                "consensus_quality_score": round(float(getattr(row, "consensus_quality_score", 0.0)), 3),
+                "tmdb_id": int(row["tmdb_id"]),
+                "title": row["title"],
+                "score": round(float(row.get("source_score", 0.0)), 3),
+                "source_score": round(float(row.get("source_score", 0.0)), 3),
+                "semantic_score": round(float(row.get("semantic_score", 0.0)), 3),
+                "bm25_score": round(float(row.get("bm25_score", 0.0)), 3),
+                "bm25_rank": int(float(row.get("bm25_rank", 0.0))),
+                "semantic_rank": int(float(row.get("semantic_rank", 0.0))),
+                "seed_relation": str(row.get("seed_relation", "") or ""),
+                "constraint_source": str(row.get("constraint_source", "") or ""),
+                "retrieval_vote_score": round(float(row.get("retrieval_vote_score", 0.0)), 3),
+                "vote_average": round(float(row["vote_average"]), 3),
+                "vote_count": int(row["vote_count"]),
+                "effective_rating": round(float(row.get("effective_rating", row["vote_average"])), 3),
+                "effective_votes": int(float(row.get("effective_votes", row["vote_count"]))),
+                "consensus_quality_score": round(float(row.get("consensus_quality_score", 0.0)), 3),
                 **evidence,
             }
         )

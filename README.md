@@ -60,7 +60,7 @@ Environment variables:
 - `TMDB_API_KEY` optional for rebuilding the enriched dataset locally
 - `HF_TOKEN` optional; only needed when `ENABLE_HF_SEMANTIC_RETRIEVAL=1`
 - `ENABLE_LLM_INTENT` optional; defaults to `1`, set to `0` to disable the short pre-retrieval intent LLM
-- `INTENT_LLM_TIMEOUT_S` optional; defaults to `4.0`
+- `INTENT_LLM_TIMEOUT_S` optional; defaults to `2.5` (reduced for budget preservation)
 - `ENABLE_HF_SEMANTIC_RETRIEVAL` optional; defaults to `0`
 - `HF_SEMANTIC_TIMEOUT_S` optional; defaults to `2.0`
 
@@ -70,11 +70,14 @@ Set the required key in the same shell before running the API:
 export OLLAMA_API_KEY=your_ollama_api_key_here
 ```
 
-Optional intent routing controls:
+To customize timeout and routing:
 
 ```bash
-export INTENT_LLM_TIMEOUT_S=4
-# export ENABLE_LLM_INTENT=0  # disable the intent LLM if needed
+# Reduce intent LLM timeout for even faster budget preservation (or increase if network is slow)
+export INTENT_LLM_TIMEOUT_S=2.5
+
+# Disable the intent LLM entirely (uses only local retrieval)
+# export ENABLE_LLM_INTENT=0
 ```
 
 Optional semantic recall controls:
@@ -85,7 +88,7 @@ export ENABLE_HF_SEMANTIC_RETRIEVAL=1
 export HF_SEMANTIC_TIMEOUT_S=2
 ```
 
-Semantic recall is intentionally narrow: it only runs for fuzzy requests such as “like Dune,” “dystopian sci-fi,” “Tarantino-style,” “vibe,” “feel,” or weak lexical cases. If Hugging Face is unavailable or times out, retrieval continues with weighted BM25.
+Semantic recall is intentionally narrow: it only runs for fuzzy requests such as "like Dune," "dystopian sci-fi," "Tarantino-style," "vibe," "feel," or weak lexical cases. Semantic search has a strict 4.5-second hard timeout to preserve budget for final LLM selection. If Hugging Face is unavailable or times out, retrieval continues with weighted BM25.
 
 Runtime constraints are local and literal. Requests like “short,” “quick,” “under 90 minutes,” or “less than 2 hours” prefer matching runtimes, and “short/quick/light” requests exclude movies over 180 minutes when enough candidates remain. Requests like “long,” “epic,” or “over 2 hours” prefer longer movies without hard-failing if the dataset has too few exact matches.
 
@@ -319,13 +322,33 @@ and writes:
 
 ### Evaluation goals
 
-The benchmark keeps the existing scoring emphasis:
+The benchmark evaluates:
 
-- hard constraint pass rate
-- history-repeat avoidance
-- retrieval mode visibility
-- description and recommendation quality proxies
-- total runtime
+- **Constraint satisfaction:** genre match, person match (actor/director), year range match
+- **History safety:** no repeats of recently watched titles
+- **Retrieval routing visibility:** tracks which retrieval mode and confidence tier was used
+- **LLM utilization:** measures whether the final LLM was invoked or fallback heuristic was used
+- **Runtime performance:** total elapsed time, retrieval time, intent time, LLM time, semantic search time
+- **Response quality:** description character count, recommendation clarity
+- **Adaptive routing:** tracks which shortlist size was selected based on confidence (description_only, judge_5, judge_8)
+
+
+### Detailed component breakdown: test timing breakdown
+
+```bash
+python -m scripts.test_timing_breakdown
+```
+
+Measures retrieval component timing in detail:
+- `candidate_pool_s`: time to build initial lexical candidate pool
+- `build_shortlist_s`: time to apply constraints and rerank
+- `semantic_elapsed_s`: time spent in optional semantic recall (when used)
+
+Expected output for typical requests:
+- candidate_pool_s: 1.5–2.0 seconds
+- build_shortlist_s: 1.5–2.0 seconds
+- semantic_elapsed_s: 0.2–0.4 seconds (if enabled)
+- Total retrieval: 3.0–4.0 seconds
 
 ## Offline Augmentation
 

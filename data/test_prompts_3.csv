@@ -1,0 +1,178 @@
+preference,watch_history
+# Basic Genre Requests
+Recommend a good action movie,
+I want to watch a comedy tonight,
+Suggest a horror movie,
+Looking for a romantic movie,
+I need a thriller recommendation,
+Want to watch a drama,
+Recommend a sci-fi film,
+Suggest an animated movie,
+Looking for a mystery movie,
+I want a fantasy film,
+
+# Mood-Based Requests
+Something funny for date night,The Proposal
+I need a feel-good movie after a rough day,
+Recommend something mind-bending,Inception
+I want to cry - give me something emotional,The Notebook
+Looking for an intense edge-of-your-seat thriller,
+Something light and easy to watch while relaxing,
+I want something dark and disturbing,Se7en
+Recommend an uplifting inspirational movie,
+Looking for something nostalgic and comforting,
+I need something exciting with lots of action,Mad Max: Fury Road
+
+# Specific Actor/Director Requests
+Recommend a movie with Tom Hanks,"Forrest Gump, Cast Away"
+I want something directed by Christopher Nolan,"Inception, The Dark Knight"
+Suggest a Leonardo DiCaprio movie,Titanic
+Looking for a Meryl Streep film,The Devil Wears Prada
+Recommend something with Denzel Washington,
+I want a Quentin Tarantino film,"Pulp Fiction, Kill Bill"
+Suggest a movie starring Scarlett Johansson,
+Looking for a Denis Villeneuve movie,Arrival
+Recommend a Greta Gerwig film,Lady Bird
+I want something with Oscar Isaac,
+
+# Language/Region Requests
+Recommend a Korean thriller,"Parasite, Oldboy"
+I want a Japanese anime film,Spirited Away
+Suggest a French movie,Amelie
+Looking for a Spanish language film,
+Recommend a Bollywood movie,
+I want a British comedy,
+Suggest a Scandinavian thriller,
+Looking for an Italian film,
+Recommend a Chinese action movie,
+I want a foreign film with subtitles,
+
+# Era/Time Period Requests
+Recommend a classic 80s movie,
+I want something from the 90s,The Matrix
+Suggest a 2000s comedy,
+Looking for a recent movie from 2023 or 2024,
+Recommend a movie set in the 1920s,The Great Gatsby
+I want something set in medieval times,
+Suggest a futuristic sci-fi movie,Blade Runner 2049
+Looking for a movie set during World War 2,Saving Private Ryan
+Recommend something set in the 1970s,
+I want a period drama,Pride and Prejudice
+
+# Audience/Context Requests
+Recommend a family-friendly movie,"Finding Nemo, Toy Story"
+I need something kid-appropriate,Frozen
+Suggest a movie for a group of friends,
+Looking for a good date night movie,"La La Land, The Notebook"
+Recommend something for movie night with parents,
+I want an adult animated film,
+Suggest a movie suitable for teenagers,
+Looking for something my grandmother would enjoy,
+Recommend a party movie,The Hangover
+I need a movie for a flight - under 2 hours,
+
+# Constraint-Based Requests
+Recommend a movie under 90 minutes,
+I want something over 2.5 hours - epic length,The Lord of the Rings
+Suggest a highly-rated movie above 8 on IMDb,
+Looking for something not too popular - hidden gem,
+Recommend something with minimal violence,
+I want a movie with no romance subplot,
+Suggest something without scary scenes,
+Looking for a movie with a happy ending,
+Recommend something unpredictable with twists,Gone Girl
+I want a slow-burn atmospheric film,
+
+# Similarity Requests
+Recommend something like Inception,"Inception, Tenet"
+I want a movie similar to Parasite,Parasite
+Suggest something like The Dark Knight,The Dark Knight
+Looking for movies like Toy Story,Toy Story
+Recommend something similar to Get Out,Get Out
+I want something like La La Land,La La Land
+Suggest movies like John Wick,"John Wick, John Wick 2"
+Looking for something like The Godfather,The Godfather
+Recommend movies similar to Spirited Away,Spirited Away
+I want something like Whiplash,Whiplash
+
+# Subgenre/Theme Requests
+Recommend a heist movie,"Ocean's Eleven, The Italian Job"
+I want a courtroom drama,A Few Good Men
+Suggest a zombie movie,Train to Busan
+Looking for a time travel film,"Back to the Future, Interstellar"
+Recommend a revenge thriller,Oldboy
+I want a coming-of-age story,Lady Bird
+Suggest a road trip movie,
+Looking for a survival film,The Revenant
+Recommend a sports movie,Rocky
+I want a musical,The Greatest Showman
+
+# Negative Constraint Requests
+Recommend a comedy that's not too cheesy,
+I want action without excessive gore,
+Suggest a horror movie that's not too scary,A Quiet Place
+Looking for romance without cliches,
+Recommend sci-fi that's not confusing,
+I want drama without being depressing,
+Suggest a thriller without jump scares,
+Looking for animation that's not childish,
+Recommend something popular but not overrated,
+I want a long movie that doesn't drag,
+
+# Complex Multi-Constraint Requests
+Recommend a sci-fi thriller under 2 hours with a twist ending,Arrival
+I want a crime drama from the 2010s with great acting,Prisoners
+Suggest a feel-good comedy suitable for the whole family,
+Looking for a psychological thriller starring a female lead,Black Swan
+Recommend an action movie with minimal CGI and practical effects,Mad Max: Fury Road
+I want a romantic comedy from after 2015 that's not cringe,Crazy Rich Asians
+Suggest a war movie that focuses on characters not just battles,1917
+Looking for a mystery with an unreliable narrator,Gone Girl
+Recommend a horror comedy that's actually funny,
+I want a biographical drama about a musician,Bohemian Rhapsody
+
+# Edge Cases and Challenging Requests
+Recommend anything good,
+Surprise me with something random,
+I have no idea what I want to watch,
+Suggest the best movie ever made,
+Looking for something unique and different,
+Recommend a movie I probably haven't seen,
+I want something that will change my perspective,
+Suggest a movie everyone should watch at least once,
+Looking for a perfect 10/10 movie,
+Recommend your personal favorite,
+
+# History-Heavy Requests (testing exclusion)
+Recommend an action movie,"John Wick, Mad Max: Fury Road, The Dark Knight, Inception"
+I want a comedy,"The Hangover, Superbad, Step Brothers, Bridesmaids"
+Suggest a thriller,"Se7en, Gone Girl, Prisoners, Zodiac, Shutter Island"
+Looking for sci-fi,"Interstellar, Arrival, Blade Runner 2049, Ex Machina, The Martian"
+Recommend a drama,"The Shawshank Redemption, Forrest Gump, The Green Mile"
+I want animation,"Toy Story, Finding Nemo, The Incredibles, Up, Coco, Inside Out"
+Suggest horror,"The Conjuring, Hereditary, Get Out, A Quiet Place, It"
+Looking for romance,"The Notebook, La La Land, Pride and Prejudice, Titanic"
+
+# Specific Quality Requests
+Recommend a visually stunning movie,Avatar
+I want something with an amazing soundtrack,"Interstellar, La La Land"
+Suggest a movie with great dialogue,Pulp Fiction
+Looking for exceptional cinematography,1917
+Recommend a movie with memorable characters,The Dark Knight
+I want something with a genius plot,Inception
+Suggest a movie with the best twist ending,The Sixth Sense
+Looking for outstanding performances,Joker
+Recommend a technically impressive film,Gravity
+I want a movie with incredible world-building,The Lord of the Rings
+
+# Conversational/Natural Requests
+What should I watch tonight?,
+Any good movies you'd recommend?,
+I'm bored - suggest something,
+Haven't seen a good movie in a while,
+What's popular right now?,
+Need a movie recommendation please,
+Help me pick something to watch,
+What would you suggest for someone who likes everything?,
+I trust your judgment - pick for me,
+Been wanting to watch something new lately,

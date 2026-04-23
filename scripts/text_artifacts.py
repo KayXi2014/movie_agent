@@ -31,6 +31,8 @@ EMBEDDING_TEXT_FIELDS = [
     ("Keywords", "keywords"),
     ("Tone", "tone_tags_text"),
     ("Audience", "audience_tags_text"),
+    ("Country", "production_countries"),
+    ("Language", "spoken_languages"),
     ("Overview", "overview"),
     ("Tagline", "tagline"),
 ]
